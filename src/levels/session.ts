@@ -91,6 +91,7 @@ export class LevelSession {
       network: this.network,
       waveCentre: this.waveCentre,
       stimulusEndMs: this.stimulusEndMs,
+      windowMs: this.windowEndMs(),
     };
     const results = evaluateChecks(this.level.checks, context);
     const passed = results.every((result) => result.passed);
@@ -110,6 +111,7 @@ export class LevelSession {
       network: this.network,
       waveCentre: this.waveCentre,
       stimulusEndMs: this.stimulusEndMs,
+      windowMs: this.windowEndMs(),
     };
     const results = evaluateChecks(this.level.checks, context);
     const passed = results.every((result) => result.passed);
@@ -121,6 +123,24 @@ export class LevelSession {
       elapsedMs: this.elapsedMs,
       ready: this.ready,
     };
+  }
+
+  /**
+   * Граница окна наблюдения, мс.
+   *
+   * ─── Почему окно НЕ растёт со временем ─────────────────────────────────
+   *
+   * Оно фиксируется на `observeMs` — ровно том времени, которое уровень
+   * просит набрать. Пока проверки смотрели всю историю, вердикт зависел от
+   * того, как долго игрок смотрел на сцену: измерено на уровне
+   * «Адаптация» — мера роста интервалов 2.53 на 250 мс и 1.25 после 430,
+   * то есть уровень «ломался» от простого ожидания.
+   *
+   * Условия, требующие всей накопленной статистики (число спайков, доля
+   * активных, обучение), окном не ограничиваются: накопление — их смысл.
+   */
+  private windowEndMs(): number {
+    return Math.max(1, this.observeMs);
   }
 
   /** Пройден ли уровень. */

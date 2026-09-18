@@ -317,14 +317,43 @@ async function main() {
       return `условий ${report.results.length}`;
     });
 
-    await add('уровень 1 проходится из своего старта', async () => {
-      await evaluate(`window.__neuroLab.actions.startLevel('level-01')`);
-      await evaluate('window.__neuroLab.actions.runSteps(2000)');
-      const report = JSON.parse(
-        await evaluate('JSON.stringify(window.__neuroLab.actions.checkLevel())'),
+    await add('КАЖДЫЙ уровень кампании проходится в приложении', async () => {
+      // ─── Почему проверяются все восемь, а не первый ──────────────────────
+      //
+      // Раньше здесь был только `level-01`. Этого мало: уровни 2–8 — это
+      // наборы числовых порогов поверх сцен, и ошибка в любом из них делает
+      // уровень НЕПРОХОДИМЫМ, не ломая при этом ничего внешне. Именно так и
+      // вышло с уровнем «Рабочая память»: `measureMemory` вызывался с
+      // `maxMs: 0`, его цикл не выполнялся ни разу, и условие
+      // «спайков после стимула ≥ 50» не могло выполниться никогда —
+      // измерено ровно 0 при 200 активных нейронах.
+      //
+      // Проверка уровня требует не «условия вернули true», а «игрок может
+      // пройти»: поэтому время наблюдения набирается с запасом.
+      const ids = JSON.parse(
+        await evaluate(
+          `JSON.stringify([...document.querySelectorAll('[data-level]')].map((b) => b.dataset.level))`,
+        ),
       );
-      expect(report.passed, `не пройден: ${JSON.stringify(report.results.map((r) => r.detail))}`);
-      return 'пройден';
+      expect(ids.length === 8, `уровней найдено ${ids.length}`);
+
+      const failed = [];
+      for (const id of ids) {
+        await evaluate(`window.__neuroLab.actions.startLevel(${JSON.stringify(id)})`);
+        await evaluate('window.__neuroLab.actions.runSteps(4000)');
+        const report = JSON.parse(
+          await evaluate('JSON.stringify(window.__neuroLab.actions.checkLevel())'),
+        );
+        if (report?.passed !== true) {
+          const detail = (report?.results ?? [])
+            .filter((r) => !r.passed)
+            .map((r) => r.detail)
+            .join('; ');
+          failed.push(`${id}: ${detail}`);
+        }
+      }
+      expect(failed.length === 0, `не проходятся:\n${failed.join('\n')}`);
+      return `пройдено ${ids.length}`;
     });
 
     await add('применение пресета выходит из кампании', async () => {

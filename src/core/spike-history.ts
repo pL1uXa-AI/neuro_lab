@@ -122,6 +122,43 @@ export class SpikeHistory {
     return out;
   }
 
+  /**
+   * Сколько спайков попало в окно [fromMs, toMs].
+   *
+   * Отдельный метод, а не `window(...).length`: проверка уровня выполняется
+   * на каждом обновлении сводки (раз в 500 мс), и создавать на каждом вызове
+   * массив объектов из десятков тысяч записей — это мусор в горячем пути.
+   * Здесь только счётчик.
+   */
+  countIn(fromMs: number, toMs: number): number {
+    let total = 0;
+    const start = this.startIndex();
+    for (let i = 0; i < this.count; i++) {
+      const time = this.times[(start + i) % this.capacity];
+      if (time < fromMs || time > toMs) continue;
+      total += 1;
+    }
+    return total;
+  }
+
+  /**
+   * Время последнего спайка в окне [fromMs, toMs]; NaN, если спайков нет.
+   *
+   * Нужно измерению удержания: «докуда дожила активность» — это время
+   * последнего спайка после снятия стимула, а не что-то, требующее
+   * продолжения симуляции.
+   */
+  lastTimeIn(fromMs: number, toMs: number): number {
+    let last = Number.NaN;
+    const start = this.startIndex();
+    for (let i = 0; i < this.count; i++) {
+      const time = this.times[(start + i) % this.capacity];
+      if (time < fromMs || time > toMs) continue;
+      if (Number.isNaN(last) || time > last) last = time;
+    }
+    return last;
+  }
+
   /** Очистить. */
   reset(): void {
     this.cursor = 0;
