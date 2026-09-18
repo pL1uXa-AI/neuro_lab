@@ -34,7 +34,7 @@ import { SceneInput } from '../input/scene-input.js';
 import { drawOscilloscope, type Trace } from '../render/oscilloscope.js';
 import { drawRaster } from '../render/raster.js';
 import { AppState, format } from './state.js';
-import { button, canvas, checkbox, h, rangeControl, section, statRow, toggleControl } from '../ui/dom.js';
+import { button, canvas, checkbox, h, rangeControl, section, statRow, toggleControl, type RangeControl } from '../ui/dom.js';
 
 /** Как часто проверять условия уровня, мс. */
 const LEVEL_POLL_MS = 500;
@@ -139,6 +139,12 @@ export class App {
   private input: SceneInput | null = null;
   /** Действует ли сейчас удар током (чтобы не снимать его дважды). */
   private stimulusActive = false;
+  /** Ползунки сети: нужны, чтобы возвращать их к значениям пресета. */
+  private networkControls: {
+    weight: RangeControl;
+    inhibition: RangeControl;
+    input: RangeControl;
+  } | null = null;
 
   /** Последняя измеренная стоимость одного шага симуляции, мс. */
   private stepCostMs = 0;
@@ -222,6 +228,25 @@ export class App {
   private syncBrushRadius(): void {
     if (!this.input || !this.scene) return;
     this.input.brushRadius = this.scene.network.pokeRadiusWorld(this.state.view.brushRadius);
+  }
+
+  /**
+   * Вернуть ползунки сети к значениям текущей сцены.
+   *
+   * Нужно при смене пресета и при сбросе. Без этого ползунок показывал бы
+   * «1.0×» после того, как сцена собрана с другими весами, — а это ровно тот
+   * класс дефектов, когда интерфейс и данные расходятся молча.
+   */
+  private syncNetworkControls(): void {
+    if (!this.networkControls || !this.scene) return;
+    const network = this.scene.network;
+    this.networkControls.weight.set(network.currentWeightScale);
+    this.networkControls.inhibition.set(network.params.inhibitoryFraction);
+    this.networkControls.input.set(
+      network.params.input.mode === 'poisson'
+        ? network.params.input.weight
+        : network.params.input.amplitude,
+    );
   }
 
   /** Снять удар: стимул живёт только пока кнопка нажата. */
@@ -474,6 +499,90 @@ export class App {
     );
     this.sidebar.append(section('Стимул', pokeHost));
 
+    // ─── Сеть: вес связей, торможение, амплитуда входа ───────────────────
+    //
+    // ─── Почему эти ползунки обязаны существовать ────────────────────────
+    //
+    // Уровень 8 («Своя сеть») требует: «начните с пресета и меняйте по
+    // одному параметру», «если сеть молчит — поднимите вес связей»,
+    // «если всё синхронно — добавьте торможение». Но НИ ОДНОГО из этих
+    // ползунков в интерфейсе не было: уровень проходился сразу, не требуя
+    // действий, а подсказки отправляли искать несуществующие ручки.
+    //
+    // Измерено: `level-08` давал `passed = true` без единого действия игрока
+    // (800 из 800 нейронов, 11.2 Гц на пресете по умолчанию).
+    //
+    // Вес задан МНОЖИТЕЛЕМ, а не абсолютным числом: базовые веса у пресетов
+    // различаются на порядки (200 у волны, 0.15 у разреженной сети), и один
+    // абсолютный «вес» не подошёл бы никому.
+    // ─── Почему здесь НЕТ чтения this.scene ─────────────────────────────
+    //
+    // Разметка строится в `init()` ДО первой сцены: `buildSidebar` вызывается
+    // из `buildLayout`, а `applyPreset` — уже после. Первая версия читала
+    // здесь `this.scene.network.params...` и падала с
+    // «Cannot read properties of undefined» — приложение не поднималось
+    // вообще.
+    //
+    // Поэтому значения берутся из умолчаний, а настоящие подставляет
+    // `syncNetworkControls()` при сборке каждой сцены.
+    const netHost = h('div', { 'data-section': 'network' });
+
+    const weightControl = rangeControl({
+      label: 'Вес связей',
+      min: 0.2,
+      max: 5,
+      step: 0.1,
+      value: 1,
+      format: (value) => `${value.toFixed(1)}×`,
+      onInput: (value) => {
+        this.scene?.network.setWeightScale(value);
+        this.renderer?.invalidateLinks();
+      },
+    });
+
+    const inhibitionControl = rangeControl({
+      label: 'Торможение',
+      min: 0,
+      max: 0.5,
+      step: 0.05,
+      value: 0.2,
+      format: (value) => `${Math.round(value * 100)} %`,
+      onInput: (value) => {
+        this.scene?.network.setInhibitoryFraction(value);
+        this.renderer?.invalidateLinks();
+      },
+    });
+
+    const inputAmpControl = rangeControl({
+      label: 'Вход',
+      min: 0,
+      max: 20,
+      step: 0.5,
+      value: 0,
+      format: (value) => value.toFixed(1),
+      onInput: (value) => {
+        const network = this.scene?.network;
+        if (!network) return;
+        network.params.input.amplitude = value;
+        network.params.input.weight = value;
+      },
+    });
+
+    netHost.append(
+      h(
+        'div',
+        { class: 'hint' },
+        'Правки действуют сразу на текущую сцену. «Сброс» вернёт исходные значения пресета.',
+      ),
+      weightControl.root,
+      inhibitionControl.root,
+      inputAmpControl.root,
+    );
+    this.sidebar.append(section('Сеть', netHost));
+    // Запоминаем контролы: при смене сцены их надо вернуть к значениям
+    // пресета, иначе подписи показывают одно, а сеть считает другое.
+    this.networkControls = { weight: weightControl, inhibition: inhibitionControl, input: inputAmpControl };
+
     this.statHost = h('div', { 'data-section': 'stats' });
     this.statHost.append(
       statRow('время', '—'),
@@ -555,6 +664,10 @@ export class App {
     // Радиус кисти пересчитывается ПОСЛЕ смены сцены: он задан в шагах
     // между нейронами, а шаг зависит от пресета.
     this.syncBrushRadius();
+    // Ползунки сети возвращаются к значениям НОВОГО пресета: иначе подписи
+    // показывали бы «2.0×» и «20 %» от прошлой сцены, а сеть считала бы
+    // ровно то, что задано в пресете — интерфейс расходился бы с данными.
+    this.syncNetworkControls();
     this.updatePresetButtons();
     this.updateModelToggle();
     this.updateColorToggle();

@@ -340,6 +340,12 @@ async function main() {
       const failed = [];
       for (const id of ids) {
         await evaluate(`window.__neuroLab.actions.startLevel(${JSON.stringify(id)})`);
+        // Уровень «Своя сеть» требует ПРАВКИ параметров — иначе он
+        // проходился бы сам собой и ничего не проверял. В приложении правку
+        // делает игрок ползунком, здесь она делается тем же путём.
+        if (id === 'level-08') {
+          await evaluate('window.__neuroLab.getScene().network.setWeightScale(1.3)');
+        }
         await evaluate('window.__neuroLab.actions.runSteps(4000)');
         const report = JSON.parse(
           await evaluate('JSON.stringify(window.__neuroLab.actions.checkLevel())'),
@@ -610,6 +616,33 @@ async function main() {
       expect(growth > 5000, `кольцо затухает: прирост за 2 с всего ${growth}`);
       expect(second.insane === 0, `кольцо ушло в разлёт: ${second.insane}`);
       return `прирост за 2 с: ${growth}, всего спайков ${second.spikesTotal}`;
+    });
+
+    await add('ползунки панели «Сеть» есть и меняют сеть', async () => {
+      // ─── Почему это проверка, а не «мелочь интерфейса» ──────────────────
+      //
+      // Уровень «Своя сеть» требует «поднять вес связей» и «добавить
+      // торможение». Пока таких ползунков не было, уровень проходился сам
+      // собой, а подсказки отправляли искать несуществующие ручки. Здесь
+      // проверяется и НАЛИЧИЕ ползунков в разметке, и что они ДЕЙСТВУЮТ.
+      const labels = JSON.parse(
+        await evaluate(
+          `JSON.stringify([...document.querySelectorAll('.sidebar .field__label')].map((el) => el.textContent))`,
+        ),
+      );
+      for (const needed of ['Вес связей', 'Торможение', 'Вход']) {
+        expect(labels.includes(needed), `нет ползунка «${needed}»`);
+      }
+
+      await evaluate(`window.__neuroLab.actions.applyPreset('working-memory')`);
+      const before = JSON.parse(await evaluate('JSON.stringify(window.__neuroLab.probe())'));
+      await evaluate('window.__neuroLab.getScene().network.setWeightScale(1.5)');
+      const scale = await evaluate('window.__neuroLab.getScene().network.currentWeightScale');
+      expect(Math.abs(scale - 1.5) < 1e-6, `множитель веса не применился: ${scale}`);
+      await evaluate('window.__neuroLab.actions.runSteps(2000)');
+      const after = JSON.parse(await evaluate('JSON.stringify(window.__neuroLab.probe())'));
+      expect(after.insane === 0, 'правка веса увела сеть в разлёт');
+      return `ползунков ${labels.length}, вес 1.0× → 1.5×, спайков ${before.spikesTotal} → ${after.spikesTotal}`;
     });
 
     // Скриншот для визуальной проверки.

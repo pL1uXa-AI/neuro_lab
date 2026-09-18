@@ -175,6 +175,23 @@ export function evaluateCheck(check: LevelCheck, context: CheckContext): CheckRe
       }
       return range(check, value, label);
     }
+    case 'networkEdited': {
+      // ─── Что здесь измеряется ───────────────────────────────────────────
+      //
+      // Отклонение ПАРАМЕТРОВ СЕТИ от того, что задал пресет. Берётся сумма
+      // двух относительных отклонений:
+      //
+      //   • множитель веса: |scale − 1| — при 1.0 сеть ровно такая, какой
+      //     её собрал пресет;
+      //   • доля торможения: |current − preset|, делённая на шкалу ползунка
+      //     (0.5), чтобы вклад был сопоставим с весом.
+      //
+      // Отклонения складываются, а не берётся максимум: сдвинуть оба
+      // параметра — тоже «собрать сеть», и это не должно наказываться.
+      const weightDelta = Math.abs(network.currentWeightScale - 1);
+      const inhibitionDelta = Math.abs(network.presetInhibitoryFraction - network.params.inhibitoryFraction) / 0.5;
+      return range(check, weightDelta + inhibitionDelta, 'изменение параметров сети');
+    }
     case 'memoryHold':
     case 'memoryGrowth': {
       // ─── Почему здесь НЕ вызывается measureMemory ────────────────────────

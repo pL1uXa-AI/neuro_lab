@@ -77,6 +77,16 @@ export interface NetworkSample {
 const HISTORY_CAPACITY = 8192;
 
 /**
+ * Отношение тормозного веса к возбуждающему — то же, что
+ * `TopologyOptions.inhibitoryRatio` при генерации топологии.
+ *
+ * Держится константой модуля, чтобы правка торможения в работающей сети
+ * давала ТУ ЖЕ картину, что и торможение, заданное пресетом: иначе
+ * ползунок «торможение» молча менял бы не только долю, но и силу.
+ */
+const INHIBITORY_RATIO = 4;
+
+/**
  * Сколько нейронов опрашивается при оценке шага между ними.
  *
  * Оценка ищет ближайшего соседа перебором, то есть стоит O(выборка · count).
@@ -107,6 +117,16 @@ export class Network {
   private coordsY: Float64Array = new Float64Array(0);
   /** Кэш шага между нейронами; null — ещё не считали. */
   private spacingCache: number | null = null;
+
+  /**
+   * Исходные веса связей (до множителя и смены торможения).
+   *
+   * `null` — снимок ещё не делался. Заполняется при ПЕРВОЙ правке весов
+   * лениво: так сцена, которую не трогали, не платит за копию массива.
+   */
+  private baseWeights: Float64Array | null = null;
+  /** Текущий множитель веса связей. */
+  private weightScale = 1;
 
   get x(): Float64Array {
     return this.coordsX;
@@ -167,6 +187,9 @@ export class Network {
     stdp: StdpParams = DEFAULT_STDP,
   ) {
     this.params = { ...params };
+    // Исходная доля торможения запоминается ДО любых правок: с ней
+    // сравнивает уровень «Своя сеть», чтобы понять, изменена ли сеть.
+    this.presetInhibitoryFraction = params.inhibitoryFraction;
     this.stdp = { ...stdp };
     this.rng = new Rng(params.seed);
     this.state = allocNeuronState(params.count);
@@ -214,6 +237,9 @@ export class Network {
   setSynapses(matrix: SynapseMatrix): void {
     this.synapses = matrix;
     this.delays = new DelayBuffer(this.params.count, matrix.maxDelaySteps);
+    // Снимок исходных весов сбрасывается: новая матрица — новая база.
+    this.baseWeights = null;
+    this.weightScale = 1;
   }
 
   /** Сбросить состояние нейронов и метрик, сохранив топологию. */
@@ -366,6 +392,80 @@ export class Network {
   /** Радиус последнего удара в мировых единицах (для отрисовки кольца). */
   pokeRadiusWorld(radiusInSpacings: number): number {
     return Math.max(0.5, radiusInSpacings) * this.neuronSpacing();
+  }
+
+  /**
+   * Множитель веса связей.
+   *
+   * ─── Зачем множитель, а не правка весов ────────────────────────────────
+   *
+   * Веса заданы топологией (у волны 200, у разреженной сети 0.15) и
+   * РАЗЛИЧАЮТСЯ на порядки. Ползунок «вес связей», который писал бы число
+   * прямо в матрицу, был бы бесполезен: одно значение не подходит разным
+   * сценам. Множитель же означает одно и то же везде — «во сколько раз
+   * усилить то, что есть».
+   *
+   * ─── Почему базовые веса хранятся отдельно ─────────────────────────────
+   *
+   * Без этого повторное применение ползунка УМНОЖАЛО бы уже умноженное:
+   * провели три раза — получили куб. Поэтому при сборке сцены копия
+   * исходных весов сохраняется, а ползунок всегда считает от неё.
+   */
+  setWeightScale(scale: number): void {
+    if (this.baseWeights === null) this.baseWeights = Float64Array.from(this.synapses.weight);
+    const factor = Number.isFinite(scale) && scale > 0 ? scale : 1;
+    const base = this.baseWeights;
+    for (let s = 0; s < this.synapses.weight.length; s++) {
+      this.synapses.weight[s] = base[s] * factor;
+    }
+    this.weightScale = factor;
+  }
+
+  /** Текущий множитель веса. */
+  get currentWeightScale(): number {
+    return this.weightScale;
+  }
+
+  /**
+   * Доля тормозных нейронов, ЗАДАННАЯ пресетом (до правок игрока).
+   *
+   * Хранится отдельно от `params.inhibitoryFraction`, потому что тот
+   * меняется при движении ползунка. Уровню «Своя сеть» нужно сравнивать
+   * текущее значение именно с ИСХОДНЫМ: иначе условие «сеть изменена»
+   * невозможно было бы выполнить — оно сравнивало бы значение с самим
+   * собой и всегда давало бы ноль.
+   */
+  readonly presetInhibitoryFraction: number;
+
+  /**
+   * Доля тормозных нейронов.
+   *
+   * Меняет ЗНАК весов исходящих связей: по соглашению проекта тормозные —
+   * это «хвост» массива (`initNeurons`), и их вес отрицателен. Сама матрица
+   * связей при этом не перестраивается — меняется только знак, что дёшево и
+   * не теряет топологию.
+   */
+  setInhibitoryFraction(fraction: number): void {
+    const clamped = Math.min(0.9, Math.max(0, fraction));
+    if (this.baseWeights === null) this.baseWeights = Float64Array.from(this.synapses.weight);
+
+    const count = this.params.count;
+    const inhibitoryCount = Math.round(count * clamped);
+    const firstInhibitory = count - inhibitoryCount;
+
+    for (let i = 0; i < count; i++) {
+      const isInhibitory = i >= firstInhibitory;
+      // Знак берётся по ИСХОДНОЙ величине связи, а множитель веса
+      // применяется сверху: иначе смена торможения затирала бы ползунок веса.
+      const begin = this.synapses.rowPtr[i];
+      const end = this.synapses.rowPtr[i + 1];
+      for (let s = begin; s < end; s++) {
+        const magnitude = Math.abs(this.baseWeights[s]) * this.weightScale;
+        this.synapses.weight[s] = isInhibitory ? -magnitude * INHIBITORY_RATIO : magnitude;
+      }
+      this.state.inhibitory[i] = isInhibitory ? 1 : 0;
+    }
+    this.params.inhibitoryFraction = clamped;
   }
 
   /** Прямая инъекция тока в один нейрон на время. */

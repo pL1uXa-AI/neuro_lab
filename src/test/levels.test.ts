@@ -35,7 +35,11 @@ import { measureWave } from '../core/wave.js';
  * задаёт центр волны. Повторяем это здесь, чтобы тест играл в ту же игру,
  * что и пользователь, а не в собственную.
  */
-function playLevel(levelId: string, extraMs = 0): { scene: Scene; session: LevelSession } {
+function playLevel(
+  levelId: string,
+  extraMs = 0,
+  edit?: (network: import('../core/network.js').Network) => void,
+): { scene: Scene; session: LevelSession } {
   const level = levelById(levelId);
   if (!level) throw new Error(`уровень ${levelId} не найден`);
   const preset = presetById(level.presetId);
@@ -43,6 +47,9 @@ function playLevel(levelId: string, extraMs = 0): { scene: Scene; session: Level
 
   const scene = buildScene(preset);
   warmUp(scene);
+  // Правка сети — ДО создания сессии и прогона: так же действует игрок,
+  // который двигает ползунок, а потом даёт сети поработать.
+  if (edit) edit(scene.network);
   const session = new LevelSession(level, scene.network);
 
   // Центр волны — как в приложении: по фактическим координатам решётки.
@@ -74,6 +81,18 @@ function describeFailure(report: ReturnType<LevelSession['checkNow']>): string {
     .map((r) => `${r.passed ? '✓' : '×'} ${r.check.label}: ${r.detail}`)
     .join('\n');
 }
+
+/**
+ * Что должен сделать игрок, чтобы пройти уровень.
+ *
+ * Пусто у большинства уровней: они проходятся наблюдением. Уровень «Своя
+ * сеть» требует ПРАВКИ — иначе он проходился бы сам собой (измерено:
+ * `passed = true` на нетронутом пресете), и это не придирка к тесту, а
+ * именно тот дефект, который здесь закрыт.
+ */
+const PLAYER_ACTION: Record<string, (n: import('../core/network.js').Network) => void> = {
+  'level-08': (n) => n.setWeightScale(1.3),
+};
 
 describe('кампания: структура', () => {
   it('уровней восемь, идентификаторы последовательны и уникальны', () => {
@@ -120,7 +139,7 @@ describe('кампания: каждый уровень ПРОХОДИТСЯ', (
   // Главный тест файла. Если он падает — игрок не может пройти кампанию.
   for (const level of LEVELS) {
     it(`${level.id} «${level.title}» проходится из своего пресета`, () => {
-      const { session } = playLevel(level.id);
+      const { session } = playLevel(level.id, 0, PLAYER_ACTION[level.id]);
       const report = session.checkNow();
       expect(report.passed, `уровень не пройден:\n${describeFailure(report)}`).toBe(true);
     });
@@ -129,7 +148,7 @@ describe('кампания: каждый уровень ПРОХОДИТСЯ', (
   it('все восемь уровней проходятся по порядку', () => {
     const failed: string[] = [];
     for (const level of LEVELS) {
-      const { session } = playLevel(level.id);
+      const { session } = playLevel(level.id, 0, PLAYER_ACTION[level.id]);
       const report = session.checkNow();
       if (!report.passed) failed.push(`${level.id}: ${describeFailure(report)}`);
     }
@@ -154,7 +173,7 @@ describe('кампания: условия не зависят от того, К
     for (const level of LEVELS) {
       for (const multiplier of [2, 4, 8]) {
         const extraMs = level.observeMs * (multiplier - 1);
-        const { session } = playLevel(level.id, extraMs);
+        const { session } = playLevel(level.id, extraMs, PLAYER_ACTION[level.id]);
         const report = session.checkNow();
         if (!report.passed) {
           failures.push(`${level.id} (×${multiplier}): ${describeFailure(report)}`);
@@ -223,6 +242,35 @@ describe('кампания: условия осмысленны, а не про�
       session.tick();
     }
     expect(session.checkNow().passed, 'нейрон без тока выдал три спайка').toBe(false);
+  });
+
+  it('уровень «Своя сеть» НЕ проходится без правки параметров', () => {
+    // ─── Дефект, который здесь закрыт ────────────────────────────────────
+    //
+    // Уровень назывался «Собрать сеть самостоятельно» и требовал «поднять
+    // вес связей» / «добавить торможение», но условия были «разряжалось
+    // больше 150 нейронов» и «частота выше 1 Гц». Пресет «Разреженная сеть»
+    // по умолчанию даёт 800 из 800 и 11.2 Гц — то есть уровень проходился
+    // СРАЗУ, не требуя ни одного действия.
+    //
+    // Теперь у уровня есть условие `networkEdited`. Этот тест следит, чтобы
+    // оно не потерялось: без него уровень снова станет бесплатным.
+    const { session } = playLevel('level-08');
+    const report = session.checkNow();
+    expect(report.passed, 'уровень «Своя сеть» проходится без всякой правки').toBe(false);
+
+    // И проваливается именно условие правки, а не что-то ещё.
+    const editCheck = report.results.find((r) => r.check.kind === 'networkEdited');
+    expect(editCheck, 'в уровне нет условия «сеть изменена»').toBeDefined();
+    expect(editCheck?.passed).toBe(false);
+  });
+
+  it('уровень «Своя сеть» проходит, если игрок изменил сеть', () => {
+    // Обратная сторона: правка обязана ЗАСЧИТЫВАТЬСЯ, иначе уровень стал бы
+    // непроходимым — это была бы та же ошибка, но с другим знаком.
+    const { session } = playLevel('level-08', 0, PLAYER_ACTION['level-08']);
+    const report = session.checkNow();
+    expect(report.passed, `не пройден после правки:\n${describeFailure(report)}`).toBe(true);
   });
 });
 
