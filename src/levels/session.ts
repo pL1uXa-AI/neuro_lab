@@ -13,6 +13,7 @@
  */
 
 import type { Network } from '../core/network.js';
+import { presetById } from '../core/presets.js';
 import type { Level } from './levels.js';
 import { evaluateChecks, type CheckResult, type CheckContext } from './checks.js';
 
@@ -35,8 +36,8 @@ export class LevelSession {
   private network: Network;
   /** Сколько модельного времени нужно набрать перед проверкой. */
   private readonly observeMs: number;
-  /** Момент снятия стимула — нужен условиям памяти. */
-  private stimulusEndMs: number;
+  /** Момент снятия стимула — нужен условиям памяти. `null` — ещё не наступил. */
+  private stimulusEndMs: number | null = null;
   private waveCentre: { centerX: number; centerY: number } | null = null;
   private completed = false;
 
@@ -44,7 +45,6 @@ export class LevelSession {
     this.level = level;
     this.network = network;
     this.observeMs = level.observeMs;
-    this.stimulusEndMs = 0;
   }
 
   /**
@@ -56,10 +56,30 @@ export class LevelSession {
    */
   tick(): void {
     if (this.completed) return;
-    // Оценка момента снятия стимула: у пространственных сцен — короткий
-    // стартовый импульс (20 мс), у сцен памяти — тоже стартовый.
-    if (this.stimulusEndMs === 0 && this.network.state.time > 30) {
-      this.stimulusEndMs = 20;
+    if (this.stimulusEndMs !== null) return;
+    // ─── Почему длительность берётся из пресета, а не из константы ──────
+    //
+    // Первая версия ждала «время > 30» и записывала жёсткое `20` — «короткий
+    // стартовый импульс». Числа совпадали с пресетами волны и памяти, и
+    // дефект был невидим. Но у кольца стартовый импульс длится **1 мс**
+    // (`durationMs: 1`), а не 20: если бы у уровня с этим пресетом появилось
+    // условие памяти, окно измерения начиналось бы на 19 мс позже стимула,
+    // то есть часть удержания молча выпала бы из подсчёта.
+    //
+    // Поэтому длительность читается у САМОГО пресета. Значение `null` —
+    // «ещё не зафиксировано»; ждём, пока стимул гарантированно пройдёт, и
+    // записываем его фактический конец.
+    const starter = presetById(this.level.presetId)?.starter;
+    if (starter === undefined) {
+      // У уровня нет стартового стимула: считать начало удержания не от
+      // чего, поэтому окно открывается с нуля.
+      this.stimulusEndMs = 0;
+      return;
+    }
+    // Ждём, пока стимул гарантированно пройдёт: он действует ровно
+    // `durationMs` от начала прогона.
+    if (this.network.state.time >= starter.durationMs) {
+      this.stimulusEndMs = starter.durationMs;
     }
   }
 
@@ -90,7 +110,7 @@ export class LevelSession {
     const context: CheckContext = {
       network: this.network,
       waveCentre: this.waveCentre,
-      stimulusEndMs: this.stimulusEndMs,
+      stimulusEndMs: this.stimulusEndMs ?? 0,
       windowMs: this.windowEndMs(),
     };
     const results = evaluateChecks(this.level.checks, context);
@@ -110,7 +130,7 @@ export class LevelSession {
     const context: CheckContext = {
       network: this.network,
       waveCentre: this.waveCentre,
-      stimulusEndMs: this.stimulusEndMs,
+      stimulusEndMs: this.stimulusEndMs ?? 0,
       windowMs: this.windowEndMs(),
     };
     const results = evaluateChecks(this.level.checks, context);
@@ -151,7 +171,7 @@ export class LevelSession {
   /** Сменить сеть (после перезапуска того же уровня). */
   rebind(network: Network): void {
     this.network = network;
-    this.stimulusEndMs = 0;
+    this.stimulusEndMs = null;
     this.completed = false;
   }
 }
