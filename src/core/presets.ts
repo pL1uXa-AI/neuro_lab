@@ -1,0 +1,359 @@
+/**
+ * Пресеты — сцены проекта как данные.
+ *
+ * Пресет фиксирует ВСЮ конфигурацию целиком: нейрон, топологию, вход, веса
+ * и стимул. Слайдеры удобны, но воспроизвести «то, что было на картинке в
+ * README» по памяти невозможно — а витринные кадры и уровни кампании
+ * обязаны воспроизводиться.
+ *
+ * ─── Откуда взялись числа ────────────────────────────────────────────────
+ *
+ * Ни одно значение здесь не выставлено «на глаз»: веса, плотности и
+ * амплитуды подобраны ИЗМЕРЕНИЯМИ (см. docs/NEXT-SESSION.md, дефекты 17–20),
+ * и в комментариях указано, что именно было измерено. Если правишь
+ * параметры — прогони пресет и сверься с подсказкой `hint`: расхождение
+ * между обещанием и фактом считается дефектом документации.
+ */
+
+import type { InputParams, NeuronModelKind, NetworkParams } from './types.js';
+import { DEFAULT_NETWORK_PARAMS } from './types.js';
+import { IZHI_MODES, modeToParams } from './neuron-types.js';
+
+/** Какая топология строится для сцены. */
+export type TopologyKind =
+  /** Разреженная случайная: базовая сеть, E/I-баланс. */
+  | 'random-sparse'
+  /** Слоистая с рекуррентным скрытым слоем: рабочая память. */
+  | 'layers'
+  /** Пространственная решётка: волны. */
+  | 'grid'
+  /** Кольцо: ритмы и бегущая волна по кругу. */
+  | 'ring'
+  /** Без связей: одиночный нейрон. */
+  | 'none';
+
+/** Параметры топологии пресета. */
+export interface PresetTopology {
+  kind: TopologyKind;
+  /** Вероятность связи. */
+  connectionProbability?: number;
+  /** Вес возбуждающей связи. */
+  excitatoryWeight?: number;
+  /** Отношение тормозного веса к возбуждающему. */
+  inhibitoryRatio?: number;
+  /** Размер стороны решётки (для 'grid'). */
+  side?: number;
+  /** Радиус связи в клетках (для 'grid'). */
+  radius?: number;
+  /** Скорость проведения, клеток за мс (для 'grid'). */
+  speed?: number;
+  /** Размеры слоёв (для 'layers'). */
+  layers?: number[];
+  /** Рекуррентные связи внутри скрытого слоя (для 'layers'). */
+  recurrentHidden?: boolean;
+  /** Сколько соседей вперёд по кольцу (для 'ring'). */
+  span?: number;
+}
+
+/** Сцена проекта. */
+export interface Preset {
+  id: string;
+  title: string;
+  /** Одна строка: что должно быть видно. */
+  hint: string;
+  /** Модель нейрона. */
+  model: NeuronModelKind;
+  /** Идентификатор режима Izhikevich (для одиночных сцен). */
+  modeId?: string;
+  /** Число нейронов. */
+  count: number;
+  inhibitoryFraction: number;
+  dt: number;
+  delay: number;
+  delayJitter: number;
+  synapticTau: number;
+  input: InputParams;
+  topology: PresetTopology;
+  /** Включён ли STDP в этой сцене. */
+  stdp: boolean;
+  /**
+   * Режим раскраски, при котором сцена читается лучше всего.
+   *
+   * Часть описания сцены, а не настройка интерфейса: у волны надо видеть
+   * вспышки, у сети в покое — кто разряжается чаще. Пользователь может
+   * переключить раскраску, но по умолчанию сцена должна открываться в том
+   * виде, в котором она что-то показывает.
+   */
+  colorMode: 'potential' | 'spike' | 'type' | 'rate';
+  /**
+   * Стимул, запускаемый вместе с пресетом: пятно или инъекция.
+   * Пространственные сцены без стартового толчка просто молчат.
+   */
+  starter?: {
+    kind: 'spot' | 'inject';
+    /** Для пятна: координаты и радиус; для инъекции — доля нейронов. */
+    radius?: number;
+    amplitude: number;
+    durationMs: number;
+    /** Доля нейронов для инъекции (0…1). */
+    fraction?: number;
+  };
+  /** Сколько миллисекунд «прогреть» сцену перед показом. */
+  warmupMs: number;
+}
+
+/**
+ * Пресеты проекта.
+ *
+ * Порядок = порядок кнопок в интерфейсе: от простого к сложному, как в
+ * phys-lab и logic-lab.
+ */
+export const PRESETS: Preset[] = [
+  {
+    id: 'single-lif',
+    title: 'Один нейрон (LIF)',
+    hint:
+      'Постоянный ток 1.6 нА чуть выше порога: спайки идут ровным рядом, ' +
+      'осциллограф показывает пилу мембранного потенциала',
+    model: 'lif',
+    count: 1,
+    inhibitoryFraction: 0,
+    dt: 0.5,
+    delay: 2,
+    delayJitter: 0,
+    synapticTau: 5,
+    input: { mode: 'const', amplitude: 1.7, rate: 0, weight: 0, fraction: 1 },
+    topology: { kind: 'none' },
+    stdp: false,
+    colorMode: 'potential',
+    warmupMs: 0,
+  },
+  {
+    id: 'single-rs',
+    title: 'Один нейрон (Izhikevich RS)',
+    hint:
+      'Regular spiking: частота спайков падает со временем — работает ' +
+      'переменная восстановления u',
+    model: 'izhikevich',
+    modeId: 'rs',
+    count: 1,
+    inhibitoryFraction: 0,
+    dt: 0.1,
+    delay: 2,
+    delayJitter: 0,
+    synapticTau: 5,
+    input: { mode: 'const', amplitude: 10, rate: 0, weight: 0, fraction: 1 },
+    topology: { kind: 'none' },
+    stdp: false,
+    colorMode: 'potential',
+    warmupMs: 0,
+  },
+  {
+    id: 'single-bursting',
+    title: 'Один нейрон (пачки)',
+    hint: 'Тонические пачки: группы из 2–3 спайков с паузами между ними',
+    model: 'izhikevich',
+    modeId: 'tonic-bursting',
+    count: 1,
+    inhibitoryFraction: 0,
+    dt: 0.1,
+    delay: 2,
+    delayJitter: 0,
+    synapticTau: 5,
+    input: { mode: 'const', amplitude: 15, rate: 0, weight: 0, fraction: 1 },
+    topology: { kind: 'none' },
+    stdp: false,
+    colorMode: 'potential',
+    warmupMs: 0,
+  },
+  {
+    id: 'random-sparse',
+    title: 'Разреженная сеть',
+    hint:
+      'Баланс возбуждения и торможения: нейроны разряжаются нерегулярно ' +
+      '(CV ISI ≈ 0.6), общего ритма нет — так выглядит кора в покое',
+    model: 'lif',
+    count: 800,
+    inhibitoryFraction: 0.2,
+    dt: 0.5,
+    delay: 2,
+    delayJitter: 0.5,
+    synapticTau: 5,
+    // Измерено: при rate = 200 Гц и весе события 8 мА сеть живёт
+    // (980 спайков за 2 с на 200 нейронах) с CV = 0.642. Пуассоновский
+    // вход — единственный способ получить нерегулярный режим: постоянный
+    // ток даёт CV = 0.000.
+    input: { mode: 'poisson', amplitude: 0, rate: 300, weight: 8, fraction: 1 },
+    topology: {
+      kind: 'random-sparse',
+      connectionProbability: 0.1,
+      excitatoryWeight: 0.15,
+      inhibitoryRatio: 5,
+    },
+    stdp: false,
+    colorMode: 'rate',
+    warmupMs: 1000,
+  },
+  {
+    id: 'stdp-learning',
+    title: 'Обучение STDP',
+    hint:
+      'Связи усиливаются и ослабляются в реальном времени: за секунды ' +
+      'распределение весов из точки превращается в широкий спектр',
+    model: 'lif',
+    count: 500,
+    inhibitoryFraction: 0,
+    dt: 0.5,
+    delay: 2,
+    delayJitter: 0.5,
+    synapticTau: 5,
+    // Торможение выключено: STDP обучает только возбуждающие связи, и с
+    // тормозными клетками картина весов читалась бы хуже.
+    input: { mode: 'poisson', amplitude: 0, rate: 300, weight: 8, fraction: 1 },
+    topology: {
+      kind: 'random-sparse',
+      connectionProbability: 0.1,
+      excitatoryWeight: 0.15,
+      inhibitoryRatio: 5,
+    },
+    stdp: true,
+    colorMode: 'potential',
+    warmupMs: 2000,
+  },
+  {
+    id: 'wave',
+    title: 'Волна активности',
+    hint:
+      'Толчок в центр запускает волну, которая бежит к краю со скоростью ' +
+      '≈3.7 клетки за мс — ровно той, что задана задержками',
+    model: 'lif',
+    count: 2500,
+    inhibitoryFraction: 0,
+    dt: 0.5,
+    delay: 1,
+    delayJitter: 0,
+    synapticTau: 5,
+    input: { mode: 'none', amplitude: 0, rate: 0, weight: 0, fraction: 0 },
+    topology: {
+      kind: 'grid',
+      side: 50,
+      radius: 8,
+      speed: 4,
+      // Измерено: вес 200 даёт наклон 3.73 при заданной скорости 4, а
+      // вес 20 — только 1.59. При весе ниже ≈50 волна вообще затухает.
+      excitatoryWeight: 200,
+      connectionProbability: 0.6,
+    },
+    stdp: false,
+    colorMode: 'spike',
+    starter: { kind: 'spot', radius: 3, amplitude: 40, durationMs: 20 },
+    warmupMs: 0,
+  },
+  {
+    id: 'working-memory',
+    title: 'Рабочая память',
+    hint:
+      'Короткий стимул — и активность держится: рекуррентная сеть ' +
+      'удерживает спайки после того, как вход исчез. Убери связи до 0.6 — ' +
+      'и память пропадёт',
+    model: 'lif',
+    count: 200,
+    inhibitoryFraction: 0,
+    dt: 0.5,
+    delay: 2,
+    delayJitter: 0,
+    synapticTau: 5,
+    input: { mode: 'none', amplitude: 0, rate: 0, weight: 0, fraction: 0 },
+    topology: {
+      kind: 'layers',
+      layers: [40, 160],
+      // Измерено: порог удержания лежит между p = 0.6 (гаснет за 100 мс)
+      // и p = 0.7 (держится неограниченно, счётчик стабилизируется ровно
+      // на 735 спайках). В пресете стоит 0.7 — выше порога, с запасом.
+      connectionProbability: 0.7,
+      excitatoryWeight: 400,
+      recurrentHidden: true,
+    },
+    stdp: false,
+    colorMode: 'spike',
+    starter: { kind: 'inject', fraction: 0.2, amplitude: 3.0, durationMs: 20 },
+    warmupMs: 0,
+  },
+  {
+    id: 'ring',
+    title: 'Кольцо',
+    hint:
+      'Возбуждение бежит по кругу и возвращается: простейший генератор ' +
+      'ритма, прообраз центрального генератора',
+    model: 'lif',
+    count: 200,
+    inhibitoryFraction: 0.2,
+    dt: 0.5,
+    delay: 2,
+    delayJitter: 0,
+    synapticTau: 5,
+    input: { mode: 'none', amplitude: 0, rate: 0, weight: 0, fraction: 0 },
+    topology: {
+      kind: 'ring',
+      span: 3,
+      excitatoryWeight: 40,
+      inhibitoryRatio: 4,
+      connectionProbability: 1,
+    },
+    stdp: false,
+    colorMode: 'spike',
+    starter: { kind: 'inject', fraction: 0.05, amplitude: 5.0, durationMs: 20 },
+    warmupMs: 0,
+  },
+];
+
+/** Пресет по идентификатору. */
+export function presetById(id: string): Preset | undefined {
+  return PRESETS.find((preset) => preset.id === id);
+}
+
+/**
+ * Параметры сети из пресета.
+ *
+ * Отдельная функция нужна потому, что `NetworkParams` и `Preset` — разные
+ * сущности: пресет описывает СЦЕНУ (включая топологию и стартовый стимул),
+ * а параметры сети — только то, что нужно ядру.
+ */
+export function presetToNetworkParams(preset: Preset): NetworkParams {
+  const base: NetworkParams = {
+    ...DEFAULT_NETWORK_PARAMS,
+    count: preset.count,
+    inhibitoryFraction: preset.inhibitoryFraction,
+    dt: preset.dt,
+    delay: preset.delay,
+    delayJitter: preset.delayJitter,
+    synapticTau: preset.synapticTau,
+    input: preset.input,
+    seed: 1,
+    useRefractory: true,
+  };
+
+  if (preset.model === 'lif') {
+    return {
+      ...base,
+      neuron: { ...DEFAULT_NETWORK_PARAMS.neuron, model: 'lif' },
+    };
+  }
+
+  // Для Izhikevich берём параметры режима из каталога ВМЕСТЕ с его точкой
+  // покоя: `modeToParams` считает истинное равновесие для конкретного `b`
+  // (см. `izhRestState`), а не подставляет «характерное» −65. Именно на
+  // этом уже спотыкались: см. дефект 12 в docs/NEXT-SESSION.md.
+  const mode = IZHI_MODES.find((item) => item.id === preset.modeId);
+  if (!mode) {
+    return { ...base, neuron: { ...DEFAULT_NETWORK_PARAMS.neuron, model: 'izhikevich' } };
+  }
+  return {
+    ...base,
+    neuron: {
+      ...DEFAULT_NETWORK_PARAMS.neuron,
+      model: 'izhikevich',
+      izh: modeToParams(mode),
+    },
+  };
+}

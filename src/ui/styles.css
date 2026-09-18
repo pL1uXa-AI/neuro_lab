@@ -1,0 +1,493 @@
+/*
+ * Оформление интерфейса.
+ *
+ * Тёмная схема выбрана не из вкуса: сцена — это светящиеся точки на тёмном
+ * фоне, и любая светлая панель рядом с ней «слепит» и мешает читать спайки.
+ */
+
+:root {
+  --bg: #0b1018;
+  --panel: #121a26;
+  --panel-2: #172231;
+  --line: #22303f;
+  --text: #dfe7f2;
+  --muted: #7a8aa0;
+  --accent: #f2a65a;
+  --accent-2: #6fb3e0;
+  --ok: #7fd6c0;
+  --bad: #f2705a;
+  --font: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  overflow: hidden;
+}
+
+#app {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  grid-template-rows: auto 1fr auto;
+  height: 100vh;
+  gap: 0;
+}
+
+/* ─── Верхняя панель ─────────────────────────────────────────────────── */
+
+.topbar {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  min-height: 44px;
+  flex-wrap: wrap;
+}
+
+.topbar__title {
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  margin-right: 6px;
+}
+
+.topbar__title small {
+  color: var(--muted);
+  font-weight: 400;
+  margin-left: 6px;
+}
+
+.topbar__spacer {
+  flex: 1;
+}
+
+/* ─── Сцена ──────────────────────────────────────────────────────────── */
+
+.stage {
+  position: relative;
+  overflow: hidden;
+  background: var(--bg);
+  min-height: 0;
+}
+
+.stage canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* ─── Подсказка поверх сцены ─────────────────────────────────────────── */
+
+.hud {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  max-width: 460px;
+  background: rgba(12, 18, 28, 0.88);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  pointer-events: none;
+}
+
+.hud__title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.hud__hint {
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.hud__progress {
+  margin-top: 6px;
+  height: 4px;
+  background: var(--panel-2);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.hud__progress > div {
+  height: 100%;
+  background: var(--accent-2);
+  transition: width 0.15s linear;
+}
+
+/* ─── Нижние панели приборов ─────────────────────────────────────────── */
+
+.instruments {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  background: var(--line);
+  border-top: 1px solid var(--line);
+  max-height: 240px;
+}
+
+.instrument {
+  background: var(--panel);
+  padding: 4px;
+  min-height: 0;
+}
+
+.instrument canvas {
+  display: block;
+  width: 100%;
+  height: 170px;
+}
+
+/* ─── Боковая колонка ────────────────────────────────────────────────── */
+
+.sidebar {
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+  /* Скролл обязателен: без него вкладки налезают друг на друга.
+     В phys-lab это был отдельный дефект — панели сжимались вместо скролла. */
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+/* ─── Секции ─────────────────────────────────────────────────────────── */
+
+.section {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  overflow: hidden;
+  /* Секция не должна сжиматься: иначе содержимое обрежется. */
+  flex-shrink: 0;
+}
+
+.section__header {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  padding: 7px 9px;
+  cursor: pointer;
+}
+
+.section__header::before {
+  content: '▾ ';
+  color: var(--muted);
+}
+
+.section__header--collapsed::before {
+  content: '▸ ';
+}
+
+.section__body {
+  padding: 8px 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.section__body--collapsed {
+  display: none;
+}
+
+/* ─── Поля ───────────────────────────────────────────────────────────── */
+
+.field {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 3px 8px;
+  align-items: center;
+}
+
+.field__label {
+  color: var(--muted);
+  grid-column: 1 / 2;
+}
+
+.field__value {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  min-width: 52px;
+}
+
+.field input[type='range'] {
+  grid-column: 1 / -1;
+  width: 100%;
+  accent-color: var(--accent-2);
+}
+
+.field--check {
+  grid-template-columns: auto 1fr;
+  cursor: pointer;
+}
+
+.field--check input {
+  accent-color: var(--accent-2);
+}
+
+.field--toggle {
+  grid-template-columns: 1fr;
+}
+
+/* ─── Кнопки ─────────────────────────────────────────────────────────── */
+
+.btn {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font: inherit;
+  padding: 5px 9px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.btn:hover {
+  background: #1c2836;
+}
+
+.btn:active {
+  transform: translateY(1px);
+}
+
+.btn--primary {
+  background: #27405c;
+  border-color: #35577a;
+}
+
+.btn--on {
+  background: #2f4a36;
+  border-color: #3f6b48;
+}
+
+.btn--flash {
+  background: var(--accent);
+  color: #201607;
+  border-color: var(--accent);
+}
+
+.btn-row {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+/* ─── Переключатели ──────────────────────────────────────────────────── */
+
+.toggle {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+.toggle__item {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 7px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.toggle__item--on {
+  background: #27405c;
+  border-color: #35577a;
+  color: var(--text);
+}
+
+/* ─── Сводка ─────────────────────────────────────────────────────────── */
+
+.stat {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.stat__label {
+  color: var(--muted);
+}
+
+.stat__value {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* ─── Список уровней ─────────────────────────────────────────────────── */
+
+.level-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.level-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+
+.level-item:hover {
+  background: var(--panel);
+}
+
+.level-item--on {
+  border-color: #35577a;
+  background: #1c2836;
+}
+
+.level-item--done .level-item__mark {
+  color: var(--ok);
+}
+
+.level-item__mark {
+  color: var(--muted);
+  width: 12px;
+}
+
+.level-item__title {
+  flex: 1;
+}
+
+/* ─── Отчёт по уровню ────────────────────────────────────────────────── */
+
+.report {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.report__row {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  line-height: 1.35;
+}
+
+.report__mark {
+  width: 12px;
+  flex-shrink: 0;
+}
+
+.report--ok .report__mark {
+  color: var(--ok);
+}
+
+.report--bad .report__mark {
+  color: var(--bad);
+}
+
+.report__detail {
+  color: var(--muted);
+}
+
+/* ─── Теория уровня ──────────────────────────────────────────────────── */
+
+.theory {
+  color: var(--text);
+  line-height: 1.5;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.theory h3 {
+  margin: 8px 0 4px;
+  font-size: 13px;
+}
+
+.theory p {
+  margin: 0 0 7px;
+}
+
+.theory ul {
+  margin: 0 0 7px;
+  padding-left: 18px;
+}
+
+.theory code {
+  background: var(--panel);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+.hint {
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.hint + .hint {
+  margin-top: 4px;
+}
+
+/* ─── Справка ────────────────────────────────────────────────────────── */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 8, 13, 0.78);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+
+.overlay__box {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 16px 18px;
+  max-width: 620px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.overlay__box h2 {
+  margin-top: 0;
+}
+
+.overlay__box table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 8px 0;
+}
+
+.overlay__box th,
+.overlay__box td {
+  text-align: left;
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--line);
+}
+
+.overlay__box th {
+  color: var(--muted);
+  font-weight: 500;
+}
