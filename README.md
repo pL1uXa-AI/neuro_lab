@@ -157,7 +157,7 @@ npm.cmd run dev      # откройте адрес, который выведе�
 | `npm.cmd run preview` | Локальный просмотр собранной версии |
 | `npm.cmd test` | Юнит-тесты ядра (224 теста, ~16 с) |
 | `npm.cmd run bench` | Замеры производительности ядра (5 замеров) |
-| `npm.cmd run smoke` | Сквозная проверка в настоящем Chrome (35 проверок, включая мышь) |
+| `npm.cmd run smoke` | Сквозная проверка в настоящем Chrome (36 проверок, включая мышь) |
 | `npm.cmd run showcase` | Пересобрать витринные кадры `docs/images/*.png` (7 кадров) |
 | `npm.cmd run typecheck` | Только проверка типов |
 
@@ -653,7 +653,7 @@ npm.cmd run typecheck     # типы
 npm.cmd test              # 224 юнит-теста ядра, ~16 с
 npm.cmd run build         # сборка
 npm.cmd run preview       # в отдельном окне
-npm.cmd run smoke         # 35 проверок в настоящем Chrome
+npm.cmd run smoke         # 36 проверок в настоящем Chrome
 npm.cmd run showcase      # 8 витринных кадров с проверкой «сцена не пуста»
 ```
 
