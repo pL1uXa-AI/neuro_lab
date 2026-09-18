@@ -25,8 +25,14 @@
 
 import type { Application } from 'pixi.js';
 import { Network } from '../core/network.js';
-import { PRESETS, presetById, type Preset } from '../core/presets.js';
+import { PRESETS, presetById, customPreset, DEFAULT_CUSTOM, CUSTOM_TOPOLOGIES, type Preset, type CustomNetworkOptions } from '../core/presets.js';
 import { buildScene, warmUp, type Scene } from '../core/scene.js';
+import {
+  DEFAULT_EXPERIMENT,
+  describeExperiment,
+  runLearningExperiment,
+  type LearningExperimentResult,
+} from '../core/experiment.js';
 import { LEVELS, levelById, type Level } from '../levels/levels.js';
 import { LevelSession, type LevelReport } from '../levels/session.js';
 import { SceneRenderer } from '../render/scene.js';
@@ -78,6 +84,15 @@ export interface NeuroLabApi {
     /** Снять «удар током». */
     endPoke(): void;
     resetScene(): void;
+    /**
+     * Прогнать опыт обучения и вернуть ИЗМЕРЕННЫЙ результат.
+     *
+     * `learn: false` — контроль: та же процедура с выключенным STDP. Он
+     * нужен потому, что без него «отклик вырос» ничего не доказывает.
+     */
+    runExperiment(options?: { trials?: number; learn?: boolean }): LearningExperimentResult;
+    /** Последний результат опыта (null, если он ещё не запускался). */
+    getExperiment(): LearningExperimentResult | null;
     openHelp(): void;
     /**
      * Закрыть справку, если она открыта.
@@ -154,6 +169,16 @@ export class App {
   private input: SceneInput | null = null;
   /** Действует ли сейчас удар током (чтобы не снимать его дважды). */
   private stimulusActive = false;
+  /** Последний результат опыта обучения: показывается в панели «Опыт». */
+  private experiment: LearningExperimentResult | null = null;
+  /** Результат контрольного прогона (STDP выключен) — для сравнения. */
+  private experimentControl: LearningExperimentResult | null = null;
+  /** Куда выводить результат опыта. */
+  private experimentHost: HTMLElement | null = null;
+  /** Ползунки «своей сети»: нужны, чтобы вернуть их к значениям пресета. */
+  private customControls: Array<{ set(value: number): void }> | null = null;
+  /** Пояснение к выбранной структуре. */
+  private customHint: HTMLElement | null = null;
   /** Ползунки сети: нужны, чтобы возвращать их к значениям пресета. */
   private networkControls: {
     weight: RangeControl;
@@ -271,6 +296,151 @@ export class App {
     this.stimulusActive = false;
   }
 
+  // ─── Опыт по обучению ──────────────────────────────────────────────────
+
+  /**
+   * Прогнать опыт обучения: сеть учится различать два паттерна.
+   *
+   * ─── Почему это отдельная операция, а не «просто прогон» ────────────────
+   *
+   * До неё проект показывал, что веса МЕНЯЮТСЯ (счётчик обновлений, разброс
+   * весов), но нигде не отвечал, стала ли сеть вести себя иначе. Разница
+   * принципиальная: измерено, что на пресете «Обучение STDP» веса после
+   * 1 200 000 обновлений лежат в 0.038…0.234, тогда как функциональный
+   * порог в этих сетях — около 6. Обучение шло, поведение не менялось.
+   *
+   * Здесь прогоняется классический протокол с учителем, и результат
+   * измеряется ДО и ПОСЛЕ: отклик на обученный паттерн против отклика на
+   * необученный. Один прогон — обучение, второй (с выключенным STDP) —
+   * контроль, без которого «выросло» ничего не доказывает.
+   */
+  runExperiment(options: { trials?: number; learn?: boolean } = {}): LearningExperimentResult {
+    const network = this.scene.network;
+    const config = {
+      ...DEFAULT_EXPERIMENT,
+      ...(options.trials !== undefined ? { trials: options.trials } : {}),
+    };
+    // Останавливаем живой цикл на время опыта: иначе сеть продолжает
+    // считать между шагами опыта, и «до/после» меряется на разном числе
+    // шагов — сравнение перестаёт быть честным.
+    const wasRunning = this.state.running;
+    this.state.running = false;
+    try {
+      const result = runLearningExperiment(network, config, { learn: options.learn ?? true });
+      if (options.learn === false) this.experimentControl = result;
+      else this.experiment = result;
+      this.updateInstruments();
+      this.updateStats();
+      return result;
+    } finally {
+      this.state.running = wasRunning;
+    }
+  }
+
+  /** Последний результат опыта. */
+  getExperiment(): LearningExperimentResult | null {
+    return this.experiment;
+  }
+
+  /**
+   * Пересобрать сцену и запустить полный опыт: обучение плюс контроль.
+   *
+   * Контроль идёт на СВЕЖЕЙ копии сцены: на уже обученной сети он измерял бы
+   * не «что было бы без обучения», а «что осталось от обучения».
+   */
+  private runExperimentPair(trials: number): void {
+    const preset = this.state.presetId ? presetById(this.state.presetId) : undefined;
+    if (!preset) return;
+
+    // ─── Почему опыт начинается со СВЕЖЕЙ сцены ──────────────────────────
+    //
+    // Если обучать ту сеть, что уже на экране, второе нажатие кнопки дало бы
+    // ДРУГОЙ результат: «до» измерялось бы на сети, которую уже обучили
+    // первым прогоном. Опыт перестал бы воспроизводиться, а «до/после»
+    // потеряло бы смысл — «до» означало бы «после предыдущего запуска».
+    //
+    // Поэтому сцена пересобирается из пресета, и обучение всегда идёт с нуля.
+    // Побочный эффект полезен: пользователь видит обученную сеть на экране.
+    this.applyPreset(preset);
+
+    // Контроль идёт на ОТДЕЛЬНОЙ свежей сцене: на той же самой он измерял бы
+    // не «что было бы без обучения», а «что осталось после него».
+    const controlScene = buildScene(preset);
+    warmUp(controlScene);
+    this.experimentControl = runLearningExperiment(
+      controlScene.network,
+      { ...DEFAULT_EXPERIMENT, trials },
+      { learn: false },
+    );
+
+    // Обучение — на сцене приложения: именно её пользователь видит и трогает.
+    this.experiment = this.runExperiment({ trials, learn: true });
+    this.renderExperiment();
+  }
+
+  /** Показать результат опыта в панели. */
+  private renderExperiment(): void {
+    if (!this.experimentHost) return;
+    const result = this.experiment;
+    this.experimentHost.replaceChildren();
+    if (!result) {
+      this.experimentHost.append(
+        h(
+          'div',
+          { class: 'hint' },
+          'Нажмите «Прогнать опыт»: сеть обучится на паттерне A и проверится ' +
+            'на паттерне B. Результат — измеренный, а не «на глаз».',
+        ),
+      );
+      return;
+    }
+
+    const { learned, summary } = describeExperiment(result, this.experimentControl ?? undefined);
+    const table = h('div', { class: 'experiment' });
+    const row = (label: string, value: string, cls = ''): HTMLElement =>
+      h(
+        'div',
+        { class: `experiment__row ${cls}` },
+        h('span', { class: 'experiment__label' }, label),
+        h('span', { class: 'experiment__value' }, value),
+      );
+
+    table.append(
+      row('отклик на A до', String(result.beforeA)),
+      row('отклик на A после', String(result.afterA), result.gain > 0 ? 'experiment__row--up' : ''),
+      row('отклик на B после', String(result.afterB)),
+      row('разделение A − B', String(result.separation), result.separation > 0 ? 'experiment__row--up' : ''),
+      row('средний вес', `${result.weightBefore.toFixed(3)} → ${result.weightAfter.toFixed(3)}`),
+      row('обновлений STDP', format.int(result.stdpUpdates)),
+    );
+    if (this.experimentControl) {
+      table.append(
+        row(
+          'контроль (без обучения)',
+          `разделение ${this.experimentControl.separation}`,
+          this.experimentControl.separation <= 0 ? 'experiment__row--ok' : 'experiment__row--warn',
+        ),
+      );
+    }
+
+    this.experimentHost.append(
+      h(
+        'div',
+        { class: `experiment__verdict ${learned ? 'experiment__verdict--yes' : 'experiment__verdict--no'}` },
+        learned ? 'Сеть научилась различать паттерны' : 'Различение не возникло',
+      ),
+      table,
+      h('div', { class: 'hint' }, summary),
+      h(
+        'div',
+        { class: 'hint' },
+        'A — паттерн, на который сеть учили (стимул, затем «учитель» заставляет ' +
+          'выход сработать). B — такой же по размеру паттерн, которым не учили. ' +
+          'Если обучение работает, отклик на A выше.',
+      ),
+    );
+  }
+
   /** Публичный API для проверок. */
   api(): NeuroLabApi {
     return {
@@ -318,6 +488,8 @@ export class App {
           this.stimulusActive = true;
         },
         endPoke: () => this.endPoke(),
+        runExperiment: (options) => this.runExperiment(options ?? {}),
+        getExperiment: () => this.experiment,
         resetScene: () => this.resetScene(),
         openHelp: () => this.openHelp(),
         closeHelp: () => this.closeHelp(),
@@ -450,6 +622,50 @@ export class App {
       }),
     );
     this.sidebar.append(section('Обучение', stdpHost));
+
+    // ─── Опыт: проверяемый результат обучения ────────────────────────────
+    //
+    // ─── Почему это нужно отдельной панелью ──────────────────────────────
+    //
+    // Всё, что проект показывал про обучение, — это ЧТО веса изменились:
+    // счётчик обновлений STDP и разброс весов. Ответа на вопрос «стала ли
+    // сеть вести себя иначе» не было нигде, и это не мелочь: измерено, что
+    // при границах STDP по умолчанию (0…1) веса гуляют в диапазоне
+    // 0.038…0.234 после миллиона обновлений, тогда как отклик читающего
+    // слоя в этих сетях начинается около веса 6. То есть обучение работало,
+    // а поведение не менялось НИКОГДА.
+    //
+    // Кнопка запускает классический протокол с учителем и показывает
+    // измеренный результат: отклик на обученный паттерн A против отклика на
+    // необученный B, до и после. Рядом идёт контроль с выключенным STDP —
+    // без него «отклик вырос» ничего не доказывает, потому что сеть могла
+    // просто разогреться от повторяющегося стимула.
+    const experimentHost = h('div', { 'data-section': 'experiment' });
+    const experimentOutput = h('div', { class: 'experiment__out' });
+    this.experimentHost = experimentOutput;
+    experimentHost.append(
+      h(
+        'div',
+        { class: 'hint' },
+        'Сеть учится различать два паттерна, и результат измеряется: отклик на ' +
+          'обученный паттерн против необученного. Опыт занимает несколько секунд ' +
+          'и меняет веса текущей сцены — «Сброс» вернёт их назад.',
+      ),
+      h(
+        'div',
+        { class: 'btn-row' },
+        button('Прогнать опыт', () => this.runExperimentPair(DEFAULT_EXPERIMENT.trials), {
+          class: 'btn--primary',
+          'data-action': 'run-experiment',
+        }),
+        button('Опыт ×2', () => this.runExperimentPair(DEFAULT_EXPERIMENT.trials * 2), {
+          'data-action': 'run-experiment-long',
+        }),
+      ),
+      experimentOutput,
+    );
+    this.sidebar.append(section('Опыт', experimentHost));
+    this.renderExperiment();
 
     const viewToggle = toggleControl<'potential' | 'spike' | 'type' | 'rate'>({
       label: 'Раскраска',
@@ -617,6 +833,24 @@ export class App {
       inputAmpControl.root,
     );
     this.sidebar.append(section('Сеть', netHost));
+
+    // ─── Своя сеть: сборка структуры, а не подкрутка чисел ───────────────
+    //
+    // ─── Почему отдельно от панели «Сеть» ────────────────────────────────
+    //
+    // Та панель правит УЖЕ СОБРАННУЮ сцену: вес, торможение, вход. Она не
+    // позволяет выбрать структуру — сколько нейронов, как они соединены, с
+    // какой плотностью. А вопрос «можно ли построить свою сеть» именно про
+    // структуру: без неё «собрать сеть» сводилось к трём множителям.
+    //
+    // Здесь параметры задаются заранее и по кнопке собирают НОВУЮ сцену.
+    // Это честнее, чем «на живу»: смена топологии требует перестройки
+    // матрицы связей, и делать вид, что она происходит мгновенно, нельзя —
+    // индексы CSR, задержки и координаты обязаны быть согласованы.
+    //
+    // Обещаний здесь нет намеренно: при произвольных числах явления может и
+    // не быть. Панель показывает, ЧТО получилось, а не что «должно».
+    this.sidebar.append(section('Своя сеть', ...this.buildCustomPanel()));
     // Запоминаем контролы: при смене сцены их надо вернуть к значениям
     // пресета, иначе подписи показывают одно, а сеть считает другое.
     this.networkControls = { weight: weightControl, inhibition: inhibitionControl, input: inputAmpControl };
@@ -694,6 +928,11 @@ export class App {
     this.trajectory = [];
     this.session = null;
     this.lastReport = null;
+    // Результат опыта относится к ПРЕДЫДУЩЕЙ сцене: оставлять его на экране
+    // после смены сцены значило бы показывать числа от другой сети.
+    this.experiment = null;
+    this.experimentControl = null;
+    this.renderExperiment();
     if (this.reportHost) this.reportHost.replaceChildren();
     if (this.theoryHost) this.theoryHost.replaceChildren();
 
@@ -1067,6 +1306,131 @@ export class App {
     this.showReport(report);
   }
 
+  // ─── Своя сеть ─────────────────────────────────────────────────────────
+
+  /** Текущие параметры «своей сети». */
+  private custom: CustomNetworkOptions = { ...DEFAULT_CUSTOM };
+
+  /**
+   * Построить панель сборки сети.
+   *
+   * Возвращается массивом, потому что всё содержимое создаётся здесь же:
+   * держать разметку и обработчики в разных местах значило бы однажды
+   * разойтись в том, какой ползунок на что влияет.
+   */
+  private buildCustomPanel(): HTMLElement[] {
+    const controls: Array<{ set(value: number): void }> = [];
+    const field = (
+      label: string,
+      key: keyof CustomNetworkOptions,
+      min: number,
+      max: number,
+      step: number,
+      format?: (value: number) => string,
+    ): HTMLElement => {
+      const control = rangeControl({
+        label,
+        min,
+        max,
+        step,
+        value: Number(this.custom[key]),
+        ...(format ? { format } : {}),
+        onInput: (value) => {
+          (this.custom[key] as number) = value;
+        },
+      });
+      controls.push(control);
+      return control.root;
+    };
+
+    const topologyControl = toggleControl<CustomNetworkOptions['topology']>({
+      label: 'Структура',
+      value: this.custom.topology,
+      items: CUSTOM_TOPOLOGIES.map((item) => ({ id: item.id, label: item.label, title: item.hint })),
+      onChange: (value) => {
+        this.custom.topology = value;
+        this.updateCustomHint();
+      },
+    });
+
+    const stdpCheck = checkbox({
+      label: 'Обучение STDP',
+      checked: this.custom.stdp,
+      onChange: (checked) => {
+        this.custom.stdp = checked;
+      },
+    });
+
+    const hint = h('div', { class: 'hint', 'data-custom-hint': 'topology' });
+    const build = button('Собрать сеть', () => this.buildCustom(), {
+      class: 'btn--primary',
+      'data-action': 'build-custom',
+    });
+
+    const panel = h(
+      'div',
+      { 'data-section': 'custom' },
+      h(
+        'div',
+        { class: 'hint' },
+        'Задайте структуру и нажмите «Собрать сеть» — сцена будет построена ' +
+          'заново из ваших чисел. Это песочница: явлений здесь никто не обещает.',
+      ),
+      topologyControl.root,
+      hint,
+      field('Нейронов', 'count', 20, 2000, 20),
+      field('Связей', 'connectionProbability', 0.01, 1, 0.01, (v) => `${Math.round(v * 100)} %`),
+      field('Вес связи', 'excitatoryWeight', 0.05, 8, 0.05, (v) => v.toFixed(2)),
+      field('Торможение', 'inhibitoryFraction', 0, 0.5, 0.05, (v) => `${Math.round(v * 100)} %`),
+      field('Сила тормоза', 'inhibitoryRatio', 1, 10, 0.5, (v) => `${v.toFixed(1)}×`),
+      field('Фоновый вход', 'inputRate', 0, 600, 25, (v) => (v > 0 ? `${v} Гц` : 'нет')),
+      stdpCheck,
+      h('div', { class: 'btn-row' }, build),
+    );
+
+    // Значения ползунков синхронизируются при пересборке пресета, поэтому
+    // список контролов сохраняется: иначе подписи показывали бы одно, а
+    // сеть была собрана по другому.
+    this.customControls = controls;
+    this.customHint = hint;
+    this.updateCustomHint();
+    return [panel];
+  }
+
+  /** Обновить пояснение к выбранной структуре. */
+  private updateCustomHint(): void {
+    if (!this.customHint) return;
+    const item = CUSTOM_TOPOLOGIES.find((entry) => entry.id === this.custom.topology);
+    this.customHint.textContent = item ? item.hint : '';
+  }
+
+  /**
+   * Собрать сеть по параметрам панели.
+   *
+   * Возвращается ФАКТ: если сеть получилась молчащей, так и написано — без
+   * этого «собрал сеть» означало бы «нажал кнопку», а не «получил результат».
+   */
+  private buildCustom(): void {
+    const preset = customPreset(this.custom);
+    this.applyPreset(preset);
+    this.state.customBuilt = true;
+    // Ползунки возвращаются к значениям, по которым сеть СОБРАНА, а не к
+    // тому, что на них успел выставить пресет: `applyPreset` вызывает
+    // `syncNetworkControls`, и без этого шага подписи разошлись бы с сетью.
+    const values = [
+      this.custom.count,
+      this.custom.connectionProbability,
+      this.custom.excitatoryWeight,
+      this.custom.inhibitoryFraction,
+      this.custom.inhibitoryRatio,
+      this.custom.inputRate,
+    ];
+    this.customControls?.forEach((control, index) => {
+      if (values[index] !== undefined) control.set(values[index]);
+    });
+    this.updateStats();
+  }
+
   // ─── Приборы ───────────────────────────────────────────────────────────
 
   private updateInstruments(): void {
@@ -1310,8 +1674,55 @@ export class App {
         {},
         'Симулятор живого мозга на минимальном уровне: нейроны с мембранным ' +
           'потенциалом обмениваются спайками, и из простых правил возникают ' +
-          'синхронизация, волны активности и обучение.',
+          'синхронизация, волны активности и обучение. Явления здесь не ' +
+          'запрограммированы — они ВОЗНИКАЮТ.',
       ),
+
+      // ─── Главное: что с этим делать ────────────────────────────────────
+      //
+      // Раньше справка начиналась с таблицы приборов — то есть отвечала на
+      // вопрос «что я вижу», но не на вопрос «что мне делать». Пользователь
+      // дважды сообщал, что непонятно, ЧТО с проектом делать, и это точный
+      // признак: интерфейс описывал себя, а не давал путь.
+      //
+      // Поэтому первым идёт конкретный маршрут с ожидаемым результатом, а
+      // таблица приборов уехала ниже — она нужна ПОСЛЕ того, как человек
+      // понял, зачем смотреть.
+      h('h3', {}, 'С чего начать — три пути'),
+      h(
+        'ol',
+        { class: 'overlay__steps' },
+        h(
+          'li',
+          {},
+          h('b', {}, 'Посмотреть явления. '),
+          'Нажимайте кнопки в панели «Сцены» слева: каждая — готовый опыт. ' +
+            '«Один нейрон» — пила потенциала на осциллографе. «Волна активности» — ' +
+            'кольцо возбуждения, расходящееся по решётке. «Кольцо» — сеть, ' +
+            'работающая генератором. Тяните мышью по сцене в любой момент: ' +
+            'под курсором нейроны получают удар током.',
+        ),
+        h(
+          'li',
+          {},
+          h('b', {}, 'Собрать свою сеть. '),
+          'Панель «Своя сеть» пересобирает сцену по вашим числам: сколько ' +
+            'нейронов, какая топология, плотность и сила связей, доля ' +
+            'торможения. Меняйте по одному параметру и смотрите, что станет ' +
+            'с частотой и с картиной на растровой диаграмме.',
+        ),
+        h(
+          'li',
+          {},
+          h('b', {}, 'Обучить и увидеть результат. '),
+          'На панели «Опыт» есть кнопка «Прогнать опыт»: сеть учат различать ' +
+            'два паттерна, а затем ИЗМЕРЯЮТ, отвечает ли она на обученный ' +
+            'паттерн сильнее, чем на необученный. Рядом считается контроль с ' +
+            'выключенным обучением — он показывает, что без обучения эффекта ' +
+            'нет. Это ответ на вопрос «а обучение вообще что-то даёт?»',
+        ),
+      ),
+
       h('h3', {}, 'Что видно'),
       h(
         'table',
@@ -1322,7 +1733,7 @@ export class App {
           'tr',
           {},
           h('td', {}, 'Осциллограф'),
-          h('td', {}, 'Потенциал нейронов во времени, с порогом и сбросом'),
+          h('td', {}, 'Потенциал одного нейрона во времени, с порогом и сбросом'),
         ),
         h(
           'tr',
@@ -1337,6 +1748,7 @@ export class App {
           h('td', {}, 'Частота всей популяции во времени; пунктир — порог «сеть молчит»'),
         ),
       ),
+
       h('h3', {}, 'Управление'),
       h(
         'ul',
@@ -1344,8 +1756,14 @@ export class App {
         h('li', {}, 'Пауза и шаг — в верхней панели (пробел и точка на клавиатуре).'),
         h('li', {}, 'Сцены переключаются кнопками в боковой панели.'),
         h('li', {}, 'STDP включается и выключается флажком «Обучение».'),
-        h('li', {}, 'Кампания ведёт от одного нейрона до рабочей памяти.'),
+        h(
+          'li',
+          {},
+          'Кампания (внизу панели) ведёт от одного нейрона до рабочей памяти: ' +
+            '8 уровней с теорией и автопроверкой.',
+        ),
       ),
+
       h('h3', {}, 'Работа со сценой'),
       h(
         'ul',
@@ -1371,11 +1789,35 @@ export class App {
             'значения пресета.',
         ),
       ),
+
+      h('h3', {}, 'Чего здесь нет — чтобы не искать'),
+      h(
+        'ul',
+        {},
+        h(
+          'li',
+          {},
+          'Это НЕ распознавание цифр и не «обучение с учителем до точности». ' +
+            'Проект про эмерджентное поведение и измеримые явления.',
+        ),
+        h(
+          'li',
+          {},
+          'Модель нейрона — LIF и Izhikevich, а не Hodgkin-Huxley: формы ' +
+            'спайка как в реальной клетке здесь не будет.',
+        ),
+        h(
+          'li',
+          {},
+          'Ритм в гамма-диапазоне (30–80 Гц) пока не воспроизводится — это ' +
+            'записано как известное ограничение, а не спрятано.',
+        ),
+      ),
       h(
         'p',
         { class: 'hint' },
         'Проект написан ИИ-агентом: код рабочий, но возможны шероховатости. ' +
-          'Подробности — в README и docs/NEXT-SESSION.md.',
+          'Подробности, измерения и история дефектов — в README и docs/NEXT-SESSION.md.',
       ),
     );
     const overlay = h('div', { class: 'overlay', on: { click: () => overlay.remove() } });

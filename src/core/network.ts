@@ -209,9 +209,27 @@ export class Network {
     this.traceYDecay = Math.exp(-params.dt / this.stdp.tauMinus);
   }
 
-  /** Включить или выключить STDP. */
-  setStdp(enabled: boolean): void {
+  /**
+   * Включить или выключить STDP.
+   *
+   * Второй аргумент — ПОЛНЫЕ параметры правила. Он нужен потому, что
+   * границы весов зависят от масштаба сцены: у волны базовый вес 200, и
+   * границы по умолчанию (0…1) обрезали бы её связи до единицы. Измерено:
+   * при включении STDP на волне число спайков за 100 мс падало с 118 016
+   * до 31 584, а 5611 связей упирались ровно в 1.
+   *
+   * Одной передачи `enabled` было недостаточно — именно так границы и
+   * оставались умолчаниями, потому что `buildScene` их вычислял, но никуда
+   * не отдавал.
+   */
+  setStdp(enabled: boolean, params?: StdpParams): void {
     this.stdp.enabled = enabled;
+    if (!params) return;
+    // Множители затухания следов зависят от τ, поэтому пересчитываются
+    // вместе с параметрами: иначе смена τ молча не подействовала бы.
+    this.stdp = { ...params, enabled };
+    this.traceXDecay = Math.exp(-this.params.dt / this.stdp.tauPlus);
+    this.traceYDecay = Math.exp(-this.params.dt / this.stdp.tauMinus);
   }
 
   /** Параметры STDP (для интерфейса и проверок). */

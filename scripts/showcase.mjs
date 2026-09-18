@@ -76,6 +76,18 @@ const SHOTS = [
     title: 'Кольцо: волна бежит по кругу',
     minFillPercent: 0.05,
   },
+  {
+    name: 'experiment',
+    preset: 'supervised-learning',
+    // Кадр опыта обучения. Перед съёмкой нажимается НАСТОЯЩАЯ кнопка
+    // «Прогнать опыт»: снимок обязан показывать то, что видит пользователь
+    // после своего действия, а не сцену, подготовленную в обход интерфейса.
+    // Обучение занимает несколько секунд, поэтому кадр делается после паузы.
+    steps: 0,
+    runExperiment: true,
+    title: 'Опыт: сеть научилась различать паттерны',
+    minFillPercent: 0.05,
+  },
 ];
 
 async function main() {
@@ -121,7 +133,31 @@ async function main() {
 
     for (const shot of SHOTS) {
       await cdp.evaluate(`window.__neuroLab.actions.applyPreset(${JSON.stringify(shot.preset)})`);
-      await cdp.evaluate(`window.__neuroLab.actions.runSteps(${shot.steps})`);
+      if (shot.runExperiment) {
+        // Кадр опыта: нажимается НАСТОЯЩАЯ кнопка, потому что снимок обязан
+        // показывать то, что видит пользователь после своего действия.
+        // Обучение идёт несколько секунд — ждём и проверяем, что панель
+        // действительно заполнилась: пустая панель означала бы «кнопка есть,
+        // но не подключена».
+        await cdp.evaluate(`document.querySelector('[data-action="run-experiment"]')?.click()`);
+        await delay(3500);
+        const panel = await cdp.evaluate(
+          `document.querySelector('[data-section="experiment"]')?.innerText ?? ''`,
+        );
+        if (!panel.includes('разделение')) {
+          throw new Error(`панель опыта не заполнилась: ${panel.slice(0, 200)}`);
+        }
+        // Панель «Опыт» лежит НИЖЕ сгиба боковой колонки, и без прокрутки
+        // кадр показывал бы сцену, но не результат — то есть снимок не
+        // доказывал бы ничего. Прокручиваем её в вид.
+        await cdp.evaluate(
+          `document.querySelector('[data-section="experiment"]')?.scrollIntoView({ block: 'center' })`,
+        );
+        await delay(300);
+      }
+      if (shot.steps > 0) {
+        await cdp.evaluate(`window.__neuroLab.actions.runSteps(${shot.steps})`);
+      }
       await delay(350);
 
       // ─── Что измеряется и что сохраняется ─────────────────────────────

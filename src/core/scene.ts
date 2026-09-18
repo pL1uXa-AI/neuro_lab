@@ -34,7 +34,14 @@ export function buildScene(preset: Preset, overrides: { seed?: number } = {}): S
   if (overrides.seed !== undefined) params.seed = overrides.seed;
   const network = new Network(params);
 
-  const stdp: StdpParams = { ...DEFAULT_STDP, enabled: preset.stdp };
+  const stdp: StdpParams = {
+    ...DEFAULT_STDP,
+    enabled: preset.stdp,
+    // Границы берутся из ПРЕСЕТА, если заданы: значения по умолчанию
+    // (0…1) — абсолютные и не годятся для сетей с весами на порядки больше.
+    // См. комментарий к `stdpBounds` в `presets.ts` и дефект 44.
+    ...(preset.stdpBounds ? { wMin: preset.stdpBounds.min, wMax: preset.stdpBounds.max } : {}),
+  };
   // Собираем связями один раз: пересобирать топологию после создания
   // сети значило бы дважды считать матрицу связей.
   const matrix = buildTopology(preset, preset.topology, params.seed, params.inhibitoryFraction);
@@ -45,7 +52,7 @@ export function buildScene(preset: Preset, overrides: { seed?: number } = {}): S
     network.x = matrix.x;
     network.y = matrix.y;
   }
-  network.setStdp(stdp.enabled);
+  network.setStdp(stdp.enabled, stdp);
 
   return { preset, network, warmedMs: 0 };
 }

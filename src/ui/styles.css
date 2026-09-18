@@ -460,6 +460,62 @@ body {
   margin-top: 4px;
 }
 
+/* ─── Опыт: измеренный результат обучения ────────────────────────────── */
+
+.experiment {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 6px 0;
+}
+
+.experiment__row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: baseline;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 2px;
+}
+
+.experiment__label {
+  color: var(--muted);
+}
+
+.experiment__value {
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+/* Выросший отклик и разделение — то, ради чего опыт и делается. */
+.experiment__row--up .experiment__value {
+  color: var(--ok);
+  font-weight: 600;
+}
+
+/* Контроль, который НЕ показал эффекта, — это правильный результат:
+   он подтверждает, что эффект дало обучение, а не сама стимуляция. */
+.experiment__row--ok .experiment__value {
+  color: var(--ok);
+}
+
+.experiment__row--warn .experiment__value {
+  color: var(--accent);
+}
+
+.experiment__verdict {
+  font-weight: 600;
+  margin: 4px 0;
+}
+
+.experiment__verdict--yes {
+  color: var(--ok);
+}
+
+.experiment__verdict--no {
+  color: var(--bad);
+}
+
 /* ─── Справка ────────────────────────────────────────────────────────── */
 
 .overlay {

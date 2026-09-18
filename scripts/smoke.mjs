@@ -716,6 +716,175 @@ async function main() {
       return `ползунков ${labels.length}, вес 1.0× → 1.5×, спайков ${before.spikesTotal} → ${after.spikesTotal}`;
     });
 
+    await add('опыт обучения: сеть научается различать паттерны', async () => {
+      // ─── Что здесь проверяется ──────────────────────────────────────────
+      //
+      // Раньше проект показывал только то, что веса МЕНЯЮТСЯ (счётчик
+      // обновлений STDP). Стала ли сеть вести себя иначе — не проверялось
+      // нигде. Здесь измеряется именно РЕЗУЛЬТАТ: отклик на обученный
+      // паттерн против необученного, плюс контроль с выключенным обучением.
+      //
+      // Контроль обязателен: без него «отклик вырос» ничего не доказывает —
+      // сеть могла просто разогреться от повторяющегося стимула.
+      await evaluate('window.__neuroLab.actions.toggleRun()');
+      await pause(150);
+      await evaluate(`window.__neuroLab.actions.applyPreset('supervised-learning')`);
+      await pause(200);
+
+      const learned = JSON.parse(
+        await evaluate('JSON.stringify(window.__neuroLab.actions.runExperiment({ trials: 30 }))'),
+      );
+      expect(learned.stdpUpdates > 0, 'обучение не сработало ни разу');
+      expect(learned.afterA > learned.afterB, `сеть не различает: A=${learned.afterA}, B=${learned.afterB}`);
+      expect(learned.separation > 0, `разделение паттернов неположительно: ${learned.separation}`);
+
+      // Контроль на СВЕЖЕЙ сети с выключенным обучением.
+      await evaluate(`window.__neuroLab.actions.applyPreset('supervised-learning')`);
+      await pause(150);
+      const control = JSON.parse(
+        await evaluate('JSON.stringify(window.__neuroLab.actions.runExperiment({ trials: 30, learn: false }))'),
+      );
+      expect(control.stdpUpdates === 0, `в контроле обучение всё же сработало: ${control.stdpUpdates}`);
+      expect(
+        control.separation <= 0,
+        `без обучения возникло «различение» ${control.separation} — значит его дал не STDP`,
+      );
+
+      await evaluate('window.__neuroLab.actions.toggleRun()');
+      await pause(150);
+      return `обученная: разделение ${learned.separation} (A ${learned.afterA}, B ${learned.afterB}); контроль: ${control.separation}`;
+    });
+
+    await add('панель «Опыт» показывает результат НАСТОЯЩИМ нажатием кнопки', async () => {
+      // Проверка «кнопка есть» ничего не доказывает: она может быть не
+      // подключена. Нажимается реальная кнопка в DOM, и читается то, что
+      // увидит пользователь.
+      await evaluate('window.__neuroLab.actions.toggleRun()');
+      await pause(150);
+      await evaluate(`window.__neuroLab.actions.applyPreset('supervised-learning')`);
+      await pause(200);
+
+      const clicked = await evaluate(`(() => {
+        const btn = document.querySelector('[data-action="run-experiment"]');
+        if (!btn) return 'нет кнопки';
+        btn.click();
+        return 'нажата';
+      })()`);
+      expect(clicked === 'нажата', `кнопка опыта не найдена: ${clicked}`);
+      await pause(3500);
+
+      const text = await evaluate(`document.querySelector('[data-section="experiment"]').innerText`);
+      expect(text.includes('научилась'), `в панели нет вывода об обучении: ${text.slice(0, 200)}`);
+      expect(text.includes('разделение'), 'в панели нет измеренного разделения');
+      expect(text.includes('контроль'), 'в панели нет контрольного прогона');
+      await evaluate('window.__neuroLab.actions.toggleRun()');
+      await pause(150);
+      return 'нажатие кнопки даёт измеренный вывод с контролем';
+    });
+
+    await add('«своя сеть» собирается по параметрам пользователя', async () => {
+      // ─── Почему это проверяется НАСТОЯЩИМИ ползунками ───────────────────
+      //
+      // Панель «Сеть» правит уже собранную сцену, но не даёт выбрать
+      // СТРУКТУРУ. Здесь двигается ползунок «Нейронов» и нажимается
+      // «Собрать сеть», а результат измеряется числом нейронов и связей.
+      await evaluate('window.__neuroLab.actions.toggleRun()');
+      await pause(150);
+
+      const moved = await evaluate(`(() => {
+        const panel = document.querySelector('[data-section="custom"]');
+        if (!panel) return 'нет панели';
+        const ranges = panel.querySelectorAll('input[type=range]');
+        ranges[0].value = '600';
+        ranges[0].dispatchEvent(new Event('input', { bubbles: true }));
+        return ranges[0].value;
+      })()`);
+      expect(moved === '600', `ползунок нейронов не сдвинулся: ${moved}`);
+
+      await evaluate(`document.querySelector('[data-action="build-custom"]').click()`);
+      await pause(700);
+      const built = JSON.parse(await evaluate('JSON.stringify(window.__neuroLab.probe())'));
+      expect(built.neuronCount === 600, `собралось ${built.neuronCount} нейронов вместо 600`);
+      expect(built.synapseCount > 0, 'у собранной сети нет связей');
+      expect(built.insane === 0, 'собранная сеть ушла в численный разлёт');
+
+      // Смена структуры обязана перестроить связи: у кольца span 1,
+      // то есть ровно по одной исходящей связи на нейрон.
+      await evaluate(`(() => {
+        const panel = document.querySelector('[data-section="custom"]');
+        const ring = [...panel.querySelectorAll('.toggle__item')].find((b) => b.textContent.trim() === 'Кольцо');
+        ring.click();
+      })()`);
+      await evaluate(`document.querySelector('[data-action="build-custom"]').click()`);
+      await pause(700);
+      const ring = JSON.parse(await evaluate('JSON.stringify(window.__neuroLab.probe())'));
+      expect(ring.synapseCount === ring.neuronCount, `кольцо дало ${ring.synapseCount} связей на ${ring.neuronCount} нейронов`);
+
+      await evaluate('window.__neuroLab.actions.toggleRun()');
+      await pause(150);
+      return `собрано ${built.neuronCount} нейронов / ${built.synapseCount} связей; кольцо ${ring.synapseCount}`;
+    });
+
+    await add('справка объясняет, ЧТО делать — тремя путями', async () => {
+      // ─── Почему это проверяемо ──────────────────────────────────────────
+      //
+      // Пользователь дважды сообщал, что непонятно, что с проектом делать.
+      // Справка раньше начиналась с таблицы приборов: она описывала, что
+      // ВИДНО, но не что ДЕЛАТЬ. Теперь в ней есть маршрут с конкретными
+      // действиями, и он обязан остаться — иначе жалоба вернётся.
+      await evaluate('window.__neuroLab.actions.openHelp()');
+      await pause(200);
+      const text = await evaluate(`document.querySelector('.overlay__box').innerText`);
+      for (const needed of ['С чего начать', 'Посмотреть явления', 'Собрать свою сеть', 'Обучить']) {
+        expect(text.includes(needed), `в справке нет раздела «${needed}»`);
+      }
+      // И честное перечисление того, чего в проекте нет: без него
+      // пользователь ищет MNIST и Hodgkin-Huxley.
+      expect(text.includes('Чего здесь нет'), 'в справке нет раздела об ограничениях');
+      await evaluate('window.__neuroLab.actions.closeHelp()');
+      await pause(150);
+      return 'справка ведёт тремя путями и называет ограничения';
+    });
+
+    await add('повторный опыт воспроизводится, а не обучает обученное', async () => {
+      // ─── Почему это отдельная проверка ──────────────────────────────────
+      //
+      // Кнопку можно нажать дважды. Если опыт обучает ту сеть, что уже на
+      // экране, второй прогон даст ДРУГОЙ результат: «до» будет измерено на
+      // сети, обученной первым прогоном. Опыт перестал бы воспроизводиться,
+      // а «до/после» потеряло бы смысл.
+      await evaluate('window.__neuroLab.actions.toggleRun()');
+      await pause(150);
+      await evaluate(`window.__neuroLab.actions.applyPreset('supervised-learning')`);
+      await pause(200);
+
+      await evaluate(`document.querySelector('[data-action="run-experiment"]').click()`);
+      await pause(3500);
+      const first = JSON.parse(
+        await evaluate(`JSON.stringify(window.__neuroLab.actions.getExperiment())`),
+      );
+      expect(first !== null, 'первый опыт не дал результата');
+
+      await evaluate(`document.querySelector('[data-action="run-experiment"]').click()`);
+      await pause(3500);
+      const second = JSON.parse(
+        await evaluate(`JSON.stringify(window.__neuroLab.actions.getExperiment())`),
+      );
+
+      // «До» обязано быть одинаковым: иначе второй прогон начал не с нуля.
+      expect(
+        second.beforeA === first.beforeA && second.beforeB === first.beforeB,
+        `второй опыт начал не со свежей сети: до (${first.beforeA}, ${first.beforeB}) → (${second.beforeA}, ${second.beforeB})`,
+      );
+      expect(
+        second.separation > 0,
+        `повторный опыт не дал различения: ${second.separation}`,
+      );
+      await evaluate('window.__neuroLab.actions.toggleRun()');
+      await pause(150);
+      return `прогон 1: разделение ${first.separation}, прогон 2: ${second.separation} при том же «до»`;
+    });
+
     // Скриншот для визуальной проверки.
     await evaluate(`window.__neuroLab.actions.applyPreset('wave')`);
     await evaluate('window.__neuroLab.actions.runSteps(400)');
