@@ -100,6 +100,49 @@ async function main() {
       return 'открывается и закрывается';
     });
 
+    await add('справка описывает ВСЕ приборы и панели', async () => {
+      // ─── Зачем это проверка, а не «текст и текст» ────────────────────────
+      //
+      // Справка — первое, что видит пользователь, и она рассказывает, ЧТО
+      // есть в приложении. Когда добавляется прибор или панель, справка
+      // отстаёт молча: ничего не падает, просто человек не знает о
+      // возможности. Именно так и вышло — график частоты и панель «Сеть»
+      // появились, а справка о них не упоминала.
+      //
+      // Проверяется НАЛИЧИЕ упоминаний, а не «текст не пуст».
+      await evaluate('window.__neuroLab.actions.openHelp()');
+      await pause(200);
+      const text = await evaluate(`(() => {
+        const box = document.querySelector('.overlay__box');
+        return box ? box.innerText : '';
+      })()`);
+      await evaluate('window.__neuroLab.actions.closeHelp()');
+
+      // Каждый прибор, который реально есть на странице, обязан быть описан.
+      const instruments = JSON.parse(
+        await evaluate(
+          `JSON.stringify([...document.querySelectorAll('[data-instrument]')].map((c) => c.dataset.instrument))`,
+        ),
+      );
+      expect(instruments.length >= 3, `приборов на странице: ${instruments.length}`);
+
+      const described = {
+        oscilloscope: 'Осциллограф',
+        raster: 'Растровая',
+        'rate-plot': 'График частоты',
+      };
+      const missing = [];
+      for (const id of instruments) {
+        const label = described[id];
+        if (label && !text.includes(label)) missing.push(`${id} («${label}»)`) ;
+      }
+      expect(missing.length === 0, `справка не описывает приборы: ${missing.join(', ')}`);
+
+      // И панель, которой пользуется уровень «Своя сеть».
+      expect(text.includes('«Сеть»'), 'справка не упоминает панель «Сеть»');
+      return `приборов ${instruments.length}, все описаны`;
+    });
+
     await add('интерфейс на русском и читаем (нет mojibake)', async () => {
       // Дефект, который не ловит ни один юнит-тест: строки валидны, сборка
       // проходит, а пользователь видит «РџСЂРѕРІРµСЂРєР°». Проверяем
