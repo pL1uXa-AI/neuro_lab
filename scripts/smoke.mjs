@@ -585,6 +585,33 @@ async function main() {
       return `записано передач ${on.pulsesRecorded}, в следе ${on.pulseEvents}`;
     });
 
+    await add('пресет «Кольцо» действительно держит ритм (не один оборот)', async () => {
+      // ─── Почему проверяется ИМЕННО удержание ────────────────────────────
+      //
+      // Пресет обещает «волну, которая бежит по кругу». Проверка «спайков
+      // больше нуля» здесь бесполезна: столько даёт и одноразовый проход.
+      // Реальная картина до правки: волна обегала кольцо РОВНО ОДИН раз и
+      // гасла навсегда — измерено `28 11 11 11 12 11 … 11 4 0 0 0`.
+      //
+      // Поэтому сравнивается прирост на ДВУХ длинных интервалах: у
+      // настоящего генератора они почти равны, у затухающего второй равен
+      // нулю.
+      await evaluate('window.__neuroLab.actions.toggleRun()');
+      await pause(150);
+      await evaluate(`window.__neuroLab.actions.applyPreset('ring')`);
+      await evaluate('window.__neuroLab.actions.runSteps(4000)');
+      const first = JSON.parse(await evaluate('JSON.stringify(window.__neuroLab.probe())'));
+      await evaluate('window.__neuroLab.actions.runSteps(4000)');
+      const second = JSON.parse(await evaluate('JSON.stringify(window.__neuroLab.probe())'));
+      await evaluate('window.__neuroLab.actions.toggleRun()');
+      await pause(150);
+
+      const growth = second.spikesTotal - first.spikesTotal;
+      expect(growth > 5000, `кольцо затухает: прирост за 2 с всего ${growth}`);
+      expect(second.insane === 0, `кольцо ушло в разлёт: ${second.insane}`);
+      return `прирост за 2 с: ${growth}, всего спайков ${second.spikesTotal}`;
+    });
+
     // Скриншот для визуальной проверки.
     await evaluate(`window.__neuroLab.actions.applyPreset('wave')`);
     await evaluate('window.__neuroLab.actions.runSteps(400)');
