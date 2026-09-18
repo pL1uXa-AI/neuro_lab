@@ -212,6 +212,34 @@ async function main() {
       return `${lit} пикселей`;
     });
 
+    await add('график частоты популяции рисуется', async () => {
+      // ─── Зачем эта проверка ─────────────────────────────────────────────
+      //
+      // Модуль `render/plots.ts` (225 строк) не импортировался ни одним
+      // файлом, а приложение при этом КАЖДЫЙ КАДР собирало массив
+      // `trajectory` (до 600 точек «время — частота») и не использовало
+      // его нигде. То есть данные для графика копились и выбрасывались, а
+      // README обещал «графики непрерывных величин».
+      //
+      // Здесь проверяется не «панель есть в разметке», а что на канвасе
+      // действительно есть нарисованная кривая: до первого кадра он пуст.
+      await evaluate(`window.__neuroLab.actions.applyPreset('random-sparse')`);
+      await evaluate('window.__neuroLab.actions.runSteps(600)');
+      await pause(400);
+      const lit = await evaluate(`(() => {
+        const c = window.__neuroLab.canvases.rate();
+        if (!c) return -1;
+        const data = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+        let count = 0;
+        for (let i = 0; i < data.length; i += 4) {
+          if (data[i] + data[i + 1] + data[i + 2] > 90) count += 1;
+        }
+        return count;
+      })()`);
+      expect(lit > 200, `освещённых пикселей графика частоты: ${lit}`);
+      return `${lit} пикселей кривой`;
+    });
+
     await add('метрики не NaN и нет численного разлёта', async () => {
       await evaluate(`window.__neuroLab.actions.applyPreset('random-sparse')`);
       await evaluate('window.__neuroLab.actions.runSteps(2000)');

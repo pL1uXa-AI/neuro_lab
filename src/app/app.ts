@@ -33,6 +33,7 @@ import { SceneRenderer } from '../render/scene.js';
 import { SceneInput } from '../input/scene-input.js';
 import { drawOscilloscope, type Trace } from '../render/oscilloscope.js';
 import { drawRaster } from '../render/raster.js';
+import { drawPlot, PLOT_COLORS } from '../render/plots.js';
 import { AppState, format } from './state.js';
 import { button, canvas, checkbox, h, rangeControl, section, statRow, toggleControl, type RangeControl } from '../ui/dom.js';
 
@@ -107,6 +108,8 @@ export interface NeuroLabApi {
     stage(): HTMLCanvasElement | null;
     raster(): HTMLCanvasElement | null;
     oscilloscope(): HTMLCanvasElement | null;
+    /** График частоты популяции (для проверок). */
+    rate(): HTMLCanvasElement | null;
   };
   /** Текущее положение кисти в мировых координатах (для проверок). */
   inputBrush(): { x: number; y: number; radius: number } | null;
@@ -129,6 +132,8 @@ export class App {
   private hudProgress!: HTMLElement;
   private rasterCanvas: HTMLCanvasElement | null = null;
   private oscilloscopeCanvas: HTMLCanvasElement | null = null;
+  /** График частоты популяции: собирается из `trajectory`. */
+  private rateCanvas: HTMLCanvasElement | null = null;
   private statHost: HTMLElement | null = null;
   private levelHost: HTMLElement | null = null;
   private reportHost: HTMLElement | null = null;
@@ -312,6 +317,7 @@ export class App {
         stage: () => this.stageHost.querySelector('canvas'),
         raster: () => this.rasterCanvas,
         oscilloscope: () => this.oscilloscopeCanvas,
+        rate: () => this.rateCanvas,
       },
       inputBrush: () => this.input?.brush ?? null,
     };
@@ -356,7 +362,29 @@ export class App {
     this.rasterCanvas = canvas('raster');
     this.rasterCanvas.dataset['instrument'] = 'raster';
     rasterBox.append(this.rasterCanvas);
-    instruments.append(oscilloscopeBox, rasterBox);
+
+    // ─── Третий прибор: график частоты популяции ─────────────────────────
+    //
+    // Почему он здесь. Приложение УЖЕ собирало данные для него: массив
+    // `trajectory` пополнялся каждый кадр (до 600 точек) и не использовался
+    // нигде — данные копились и выбрасывались. Заодно модуль `render/plots.ts`
+    // (225 строк) не импортировался ни одним файлом, а README обещал
+    // «графики непрерывных величин».
+    //
+    // График частоты полезен именно здесь: осциллограф показывает ОДИН
+    // нейрон, растровая диаграмма — кто когда сработал, а частота
+    // популяции отвечает на вопрос «что происходит со всей сетью в целом»:
+    // при обучении она падает, при разгоне растёт, у кольца выходит на
+    // постоянную.
+    //
+    // Раскраска графика совпадает с палитрой рельс (PLOT_COLORS), чтобы не
+    // вводить третью цветовую схему.
+    const rateBox = h('div', { class: 'instrument' });
+    this.rateCanvas = canvas('rate-plot');
+    this.rateCanvas.dataset['instrument'] = 'rate-plot';
+    rateBox.append(this.rateCanvas);
+
+    instruments.append(oscilloscopeBox, rasterBox, rateBox);
 
     this.host.append(topbar, this.stageHost, this.sidebar, instruments);
   }
@@ -1053,6 +1081,27 @@ export class App {
 
     this.trajectory.push({ time: network.state.time, rate: this.currentRate(network) });
     if (this.trajectory.length > 600) this.trajectory.shift();
+
+    // ─── График частоты популяции ────────────────────────────────────────
+    // Третья серия — порог «сеть молчит» (1 Гц): по нему сразу видно,
+    // работает сеть или погасла, без чтения чисел из сводки.
+    if (this.rateCanvas) {
+      drawPlot(this.rateCanvas, {
+        title: 'Частота популяции',
+        unit: 'Гц',
+        series: [
+          {
+            label: 'частота',
+            color: PLOT_COLORS.rate,
+            times: this.trajectory.map((point) => point.time),
+            values: this.trajectory.map((point) => point.rate),
+            fill: true,
+            width: 1.4,
+          },
+        ],
+        guide: { value: 1, label: 'молчание', color: PLOT_COLORS.guide },
+      });
+    }
   }
 
   /** Средняя частота популяции за прогон, Гц. */
