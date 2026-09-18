@@ -77,16 +77,6 @@ export interface NetworkSample {
 const HISTORY_CAPACITY = 8192;
 
 /**
- * Отношение тормозного веса к возбуждающему — то же, что
- * `TopologyOptions.inhibitoryRatio` при генерации топологии.
- *
- * Держится константой модуля, чтобы правка торможения в работающей сети
- * давала ТУ ЖЕ картину, что и торможение, заданное пресетом: иначе
- * ползунок «торможение» молча менял бы не только долю, но и силу.
- */
-const INHIBITORY_RATIO = 4;
-
-/**
  * Сколько нейронов опрашивается при оценке шага между ними.
  *
  * Оценка ищет ближайшего соседа перебором, то есть стоит O(выборка · count).
@@ -119,12 +109,13 @@ export class Network {
   private spacingCache: number | null = null;
 
   /**
-   * Исходные веса связей (до множителя и смены торможения).
+   * «Эталонные» модули весов — по одному на связь, в возбуждающем
+   * эквиваленте (см. `ensureBaseMagnitudes`).
    *
    * `null` — снимок ещё не делался. Заполняется при ПЕРВОЙ правке весов
    * лениво: так сцена, которую не трогали, не платит за копию массива.
    */
-  private baseWeights: Float64Array | null = null;
+  private baseMagnitudes: Float64Array | null = null;
   /** Текущий множитель веса связей. */
   private weightScale = 1;
 
@@ -237,8 +228,8 @@ export class Network {
   setSynapses(matrix: SynapseMatrix): void {
     this.synapses = matrix;
     this.delays = new DelayBuffer(this.params.count, matrix.maxDelaySteps);
-    // Снимок исходных весов сбрасывается: новая матрица — новая база.
-    this.baseWeights = null;
+    // Снимок эталонных весов сбрасывается: новая матрица — новая база.
+    this.baseMagnitudes = null;
     this.weightScale = 1;
   }
 
@@ -412,11 +403,20 @@ export class Network {
    * исходных весов сохраняется, а ползунок всегда считает от неё.
    */
   setWeightScale(scale: number): void {
-    if (this.baseWeights === null) this.baseWeights = Float64Array.from(this.synapses.weight);
+    this.ensureBaseMagnitudes();
     const factor = Number.isFinite(scale) && scale > 0 ? scale : 1;
-    const base = this.baseWeights;
-    for (let s = 0; s < this.synapses.weight.length; s++) {
-      this.synapses.weight[s] = base[s] * factor;
+    const base = this.baseMagnitudes;
+    if (base === null) return;
+
+    const ratio = this.params.inhibitoryRatio;
+    for (let i = 0; i < this.params.count; i++) {
+      const isInhibitory = this.state.inhibitory[i] === 1;
+      const begin = this.synapses.rowPtr[i];
+      const end = this.synapses.rowPtr[i + 1];
+      for (let s = begin; s < end; s++) {
+        const magnitude = base[s] * factor;
+        this.synapses.weight[s] = isInhibitory ? -magnitude * ratio : magnitude;
+      }
     }
     this.weightScale = factor;
   }
@@ -424,6 +424,42 @@ export class Network {
   /** Текущий множитель веса. */
   get currentWeightScale(): number {
     return this.weightScale;
+  }
+
+  /**
+   * Снять «эталонные» модули весов — по одному на связь.
+   *
+   * ─── Зачем приводить к единому виду ────────────────────────────────────
+   *
+   * Топология генерирует тормозные связи уже умноженными на
+   * `inhibitoryRatio` (в проекте это 4 или 5, у разных пресетов по-разному).
+   * Если правка торможения возьмёт `|w|` и снова умножит на отношение, то
+   * для УЖЕ тормозной связи отношение применится дважды.
+   *
+   * Измерено на реальном дефекте: у разреженной сети отношение тормозного
+   * веса к возбуждающему было 5, а после одного касания ползунка
+   * торможения становилось **20** — вчетверо сильнее, хотя доля тормозных
+   * нейронов не менялась.
+   *
+   * Поэтому эталон хранится в «возбуждающем эквиваленте»: модуль
+   * возбуждающей связи как есть, а тормозной — ДЕЛЁННЫЙ на отношение.
+   * Тогда формула `magnitude` / `magnitude · ratio` даёт ровно исходные
+   * веса, сколько бы раз её ни применяли.
+   */
+  private ensureBaseMagnitudes(): void {
+    if (this.baseMagnitudes !== null) return;
+    const ratio = this.params.inhibitoryRatio > 0 ? this.params.inhibitoryRatio : 1;
+    const base = new Float64Array(this.synapses.weight.length);
+    for (let i = 0; i < this.params.count; i++) {
+      const isInhibitory = this.state.inhibitory[i] === 1;
+      const begin = this.synapses.rowPtr[i];
+      const end = this.synapses.rowPtr[i + 1];
+      for (let s = begin; s < end; s++) {
+        const magnitude = Math.abs(this.synapses.weight[s]);
+        base[s] = isInhibitory ? magnitude / ratio : magnitude;
+      }
+    }
+    this.baseMagnitudes = base;
   }
 
   /**
@@ -447,21 +483,24 @@ export class Network {
    */
   setInhibitoryFraction(fraction: number): void {
     const clamped = Math.min(0.9, Math.max(0, fraction));
-    if (this.baseWeights === null) this.baseWeights = Float64Array.from(this.synapses.weight);
+    this.ensureBaseMagnitudes();
+    const base = this.baseMagnitudes;
+    if (base === null) return;
 
     const count = this.params.count;
     const inhibitoryCount = Math.round(count * clamped);
     const firstInhibitory = count - inhibitoryCount;
+    const ratio = this.params.inhibitoryRatio > 0 ? this.params.inhibitoryRatio : 1;
 
     for (let i = 0; i < count; i++) {
       const isInhibitory = i >= firstInhibitory;
-      // Знак берётся по ИСХОДНОЙ величине связи, а множитель веса
+      // Знак берётся по ЭТАЛОННОЙ величине связи, а множитель веса
       // применяется сверху: иначе смена торможения затирала бы ползунок веса.
       const begin = this.synapses.rowPtr[i];
       const end = this.synapses.rowPtr[i + 1];
       for (let s = begin; s < end; s++) {
-        const magnitude = Math.abs(this.baseWeights[s]) * this.weightScale;
-        this.synapses.weight[s] = isInhibitory ? -magnitude * INHIBITORY_RATIO : magnitude;
+        const magnitude = base[s] * this.weightScale;
+        this.synapses.weight[s] = isInhibitory ? -magnitude * ratio : magnitude;
       }
       this.state.inhibitory[i] = isInhibitory ? 1 : 0;
     }

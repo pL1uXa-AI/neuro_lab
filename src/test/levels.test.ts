@@ -26,6 +26,7 @@ import { LEVELS, levelById, levelNumber } from '../levels/levels.js';
 import { LevelSession } from '../levels/session.js';
 import { buildScene, warmUp, applyStarter, type Scene } from '../core/scene.js';
 import { presetById } from '../core/presets.js';
+import { evaluateCheck } from '../levels/checks.js';
 import { measureWave } from '../core/wave.js';
 
 /**
@@ -93,6 +94,15 @@ function describeFailure(report: ReturnType<LevelSession['checkNow']>): string {
 const PLAYER_ACTION: Record<string, (n: import('../core/network.js').Network) => void> = {
   'level-08': (n) => n.setWeightScale(1.3),
 };
+
+/** Собрать и прогреть сцену по идентификатору пресета. */
+function sceneOf(id: string): import('../core/network.js').Network {
+  const preset = presetById(id);
+  if (!preset) throw new Error(`нет пресета ${id}`);
+  const scene = buildScene(preset);
+  warmUp(scene);
+  return scene.network;
+}
 
 describe('кампания: структура', () => {
   it('уровней восемь, идентификаторы последовательны и уникальны', () => {
@@ -271,6 +281,112 @@ describe('кампания: условия осмысленны, а не про�
     const { session } = playLevel('level-08', 0, PLAYER_ACTION['level-08']);
     const report = session.checkNow();
     expect(report.passed, `не пройден после правки:\n${describeFailure(report)}`).toBe(true);
+  });
+});
+
+describe('кампания: условия «синхронность» и «удержание» действительно различают', () => {
+  /**
+   * Проверка одного условия на заданной сети.
+   *
+   * Нужна, потому что оба условия раньше не использовались ни одним уровнем
+   * (`synchrony` и `memoryHold` были реализованы в `checks.ts`, но вызовов не
+   * имели). Мёртвый код легко «оживить» неверно: условие, которое всегда
+   * проходит, хуже отсутствующего — оно создаёт видимость проверки.
+   */
+  function checkOn(
+    network: import('../core/network.js').Network,
+    check: import('../levels/levels.js').LevelCheck,
+    windowMs: number,
+  ) {
+    return evaluateCheck(check, {
+      network,
+      waveCentre: null,
+      stimulusEndMs: 20,
+      windowMs,
+    });
+  }
+
+  it('синхронность различает асинхронный режим и общий разряд', () => {
+    // Мера синхронности считает долю спайков, попавших в одни бины времени.
+    // Проверяются ДВА крайних режима, а не «число больше порога».
+    //
+    // Асинхронный режим: разреженная сеть с пуассоновским входом.
+    const sparse = sceneOf('random-sparse');
+    sparse.run(3000);
+    const asyncResult = checkOn(sparse, { kind: 'synchrony', max: 0.2, label: 'x' }, 1500);
+    expect(asyncResult.passed, 'асинхронная сеть не прошла условие «нет ритма»').toBe(true);
+    // Измерено: синхронность ≈ 0.0001 — спайки размазаны по времени.
+    expect(asyncResult.value).toBeLessThan(0.05);
+
+    // Общий разряд: та же сеть, но с постоянным током вместо пуассоновского
+    // входа. Измерено: синхронность в этом режиме заметно выше.
+    const driven = sceneOf('random-sparse');
+    driven.params.input.mode = 'const';
+    driven.params.input.amplitude = 6;
+    driven.params.input.fraction = 1;
+    driven.run(3000);
+    const syncResult = checkOn(driven, { kind: 'synchrony', max: 0.2, label: 'x' }, 1500);
+    // Условие «нет общего ритма» обязано стать СТРОЖЕ к постоянному току:
+    // именно в этом смысл меры.
+    expect(
+      syncResult.value,
+      'постоянный ток не повысил синхронность — мера не различает режимы',
+    ).toBeGreaterThan(asyncResult.value);
+  });
+
+  it('удержание НЕ растёт с временем наблюдения', () => {
+    // ─── Дефект, который здесь закрыт ────────────────────────────────────
+    //
+    // Первая версия брала всю накопленную историю, и «удержание» росло
+    // вместе с временем прогона: измерено 578 → 1180 → 2380 → 4780 мс при
+    // наблюдении 600 → 1200 → 2400 → 4800. Условие «удержание ≥ 200 мс»
+    // выполнялось бы ВСЕГДА, даже если активность погасла на 30-й мс.
+    //
+    // Вторая версия ограничила окно, но упёрлась в ёмкость кольцевого
+    // буфера истории: при 382 000 спайков начало окна вытеснялось, и
+    // условие давало 0 там, где сеть работала.
+    //
+    // Рабочее определение — скользящее окно шириной `observeMs`, прижатое
+    // к моменту проверки: оно и не растёт, и не вытесняется.
+    const preset = presetById('working-memory');
+    if (!preset) throw new Error('нет пресета');
+
+    const values: number[] = [];
+    for (const multiple of [1, 2, 4, 8]) {
+      const network = sceneOf('working-memory');
+      network.run(Math.ceil((preset.dt > 0 ? 2000 : 2000) * multiple / preset.dt / 2));
+      const result = checkOn(
+        network,
+        { kind: 'memoryHold', min: 200, label: 'x' },
+        600,
+      );
+      values.push(result.value);
+      // Удержание не может превышать ширину окна: иначе оно измеряет уже
+      // не память, а длительность прогона.
+      expect(result.value, `×${multiple}: удержание ${result.value} > окна 600`).toBeLessThanOrEqual(600);
+    }
+    // И при любом времени наблюдения активность ДЕРЖИТСЯ: все значения
+    // у верхней границы окна.
+    for (const value of values) {
+      expect(value, `удержание ${value} — активность не держится`).toBeGreaterThan(400);
+    }
+  });
+
+  it('удержание падает, когда рекуррентность ослаблена до предела', () => {
+    // Обратная сторона: условие обязано ПРОВАЛИВАТЬСЯ на сети без памяти.
+    //
+    // ─── Почему ослабление именно такое ──────────────────────────────────
+    //
+    // Сцена памяти нарочно устроена с запасом: измерено, что при множителе
+    // веса 0.05 она ВСЁ РАВНО держит активность (окна по 150 мс дают
+    // стабильные ~11 500 спайков). Ослаблять «на глаз» бессмысленно —
+    // проверка должна идти до режима, где память ДЕЙСТВИТЕЛЬНО пропадает.
+    // Измерено: при 0.001 прирост прекращается (40 спайков и дальше нули).
+    const network = sceneOf('working-memory');
+    network.setWeightScale(0.001);
+    network.run(3000);
+    const result = checkOn(network, { kind: 'memoryHold', min: 200, label: 'x' }, 600);
+    expect(result.passed, `погасшая сеть прошла условие удержания: ${result.detail}`).toBe(false);
   });
 });
 

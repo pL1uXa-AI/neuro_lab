@@ -353,6 +353,11 @@ export function presetToNetworkParams(preset: Preset): NetworkParams {
     input: preset.input,
     seed: 1,
     useRefractory: true,
+    // Соотношение тормозного и возбуждающего веса берётся из ТОПОЛОГИИ
+    // пресета, а не из умолчания: у сетей оно разное (5 у разреженной, 4 у
+    // кольца). Сеть «на живу» использует его, когда восстанавливает веса
+    // после правки доли торможения.
+    inhibitoryRatio: preset.topology.inhibitoryRatio ?? DEFAULT_NETWORK_PARAMS.inhibitoryRatio,
   };
 
   if (preset.model === 'lif') {

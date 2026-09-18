@@ -156,3 +156,94 @@ describe('правка сети: торможение', () => {
     expect(fresh.network.params.inhibitoryFraction).toBe(preset.inhibitoryFraction);
   });
 });
+
+describe('правка сети: соотношение тормозного и возбуждающего веса', () => {
+  /**
+   * Отношение тормозного веса к возбуждающему по модулю.
+   *
+   * `NaN`, если тормозных связей нет в принципе: у сцен без торможения
+   * (кольцо, волна, рабочая память) делить не на что, и это НЕ ошибка.
+   */
+  function inhibitoryRatioOf(network: Network): number {
+    let minExcitatory = Infinity;
+    let minInhibitory = Infinity;
+    for (let i = 0; i < network.params.count; i++) {
+      const inhibitory = network.state.inhibitory[i] === 1;
+      for (let s = network.synapses.rowPtr[i]; s < network.synapses.rowPtr[i + 1]; s++) {
+        const magnitude = Math.abs(network.synapses.weight[s]);
+        if (inhibitory) minInhibitory = Math.min(minInhibitory, magnitude);
+        else minExcitatory = Math.min(minExcitatory, magnitude);
+      }
+    }
+    if (!Number.isFinite(minInhibitory) || !Number.isFinite(minExcitatory)) return Number.NaN;
+    return minInhibitory / minExcitatory;
+  }
+
+  it('правка доли торможения НЕ меняет соотношение весов', () => {
+    // ─── Дефект, который здесь закрыт ────────────────────────────────────
+    //
+    // Топология генерирует тормозные связи уже умноженными на отношение
+    // (5 у разреженной сети). Первая версия правки брала `|w|` и снова
+    // умножаала на отношение, то есть применяла его ДВАЖДЫ: измерено —
+    // одно касание ползунка меняло отношение 5 → 20, то есть усиливало
+    // торможение вчетверо при неизменной доле тормозных нейронов.
+    //
+    // Проверка ставит ТУ ЖЕ долю, что уже есть: при корректной реализации
+    // веса обязаны остаться ровно теми же.
+    const network = sceneOf('random-sparse');
+    const before = inhibitoryRatioOf(network);
+    expect(before).toBeCloseTo(5, 6);
+
+    network.setInhibitoryFraction(network.params.inhibitoryFraction);
+    expect(inhibitoryRatioOf(network)).toBeCloseTo(before, 6);
+  });
+
+  it('повторная правка торможения тоже не накапливается', () => {
+    const network = sceneOf('random-sparse');
+    const before = inhibitoryRatioOf(network);
+    for (let i = 0; i < 5; i++) {
+      network.setInhibitoryFraction(network.params.inhibitoryFraction);
+    }
+    expect(inhibitoryRatioOf(network)).toBeCloseTo(before, 6);
+  });
+
+  it('совместная правка веса и торможения сохраняет соотношение', () => {
+    // Оба ползунка пишут ОДНИ И ТЕ ЖЕ веса, поэтому их взаимодействие —
+    // отдельный риск: вес не должен затирать знак торможения, а торможение —
+    // множитель веса.
+    const network = sceneOf('random-sparse');
+    const before = inhibitoryRatioOf(network);
+
+    network.setWeightScale(2);
+    network.setInhibitoryFraction(network.params.inhibitoryFraction);
+    // Соотношение сохраняется, а общая величина — выросла вдвое.
+    expect(inhibitoryRatioOf(network)).toBeCloseTo(before, 6);
+    expect(network.currentWeightScale).toBe(2);
+
+    let maxExcitatory = 0;
+    for (let i = 0; i < network.params.count; i++) {
+      if (network.state.inhibitory[i] === 1) continue;
+      for (let s = network.synapses.rowPtr[i]; s < network.synapses.rowPtr[i + 1]; s++) {
+        maxExcitatory = Math.max(maxExcitatory, network.synapses.weight[s]);
+      }
+    }
+    // Базовый вес разреженной сети 0.15, множитель 2 → максимум 0.3.
+    expect(maxExcitatory).toBeCloseTo(0.3, 6);
+  });
+
+  it('каждая сцена сохраняет своё соотношение, а не общее', () => {
+    // У разреженной сети отношение 5, у кольца 4 — сцена обязана держать
+    // СВОЁ. Зашитая константа сделала бы их одинаковыми.
+    const sparse = sceneOf('random-sparse');
+    expect(inhibitoryRatioOf(sparse)).toBeCloseTo(sparse.params.inhibitoryRatio, 6);
+
+    // Сцены без торможения: соотношение не определено, и это не ошибка.
+    for (const id of ['ring', 'wave', 'working-memory']) {
+      const network = sceneOf(id);
+      expect(Number.isNaN(inhibitoryRatioOf(network)), id).toBe(true);
+      // Но правка торможения обязана РАБОТАТЬ и там.
+      network.setInhibitoryFraction(0.2);
+      expect(inhibitoryRatioOf(network), id).toBeCloseTo(network.params.inhibitoryRatio, 6);
+    }
+  });
+});
