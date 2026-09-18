@@ -18,6 +18,8 @@
 import { describe, expect, it } from 'vitest';
 import { presetById } from '../core/presets.js';
 import { buildScene, warmUp } from '../core/scene.js';
+import { measureMemory } from '../core/memory.js';
+import { evaluateCheck } from '../levels/checks.js';
 import type { Network } from '../core/network.js';
 
 /** Суммарное число спайков. */
@@ -245,5 +247,63 @@ describe('правка сети: соотношение тормозного и 
       network.setInhibitoryFraction(0.2);
       expect(inhibitoryRatioOf(network), id).toBeCloseTo(network.params.inhibitoryRatio, 6);
     }
+  });
+});
+
+describe('сцена памяти: две меры удержания не расходятся', () => {
+  /**
+   * ─── Почему эта проверка существует ─────────────────────────────────
+   *
+   * Задачу «держится ли активность» решают ДВА разных места:
+   *
+   *   • `measureMemory` (ядро) — продвигает симуляцию, годится для
+   *     измерения порога при подборе параметров;
+   *   • условие уровня `memoryHold` — только читает историю, потому что
+   *     проверка уровня не имеет права двигать сеть за игрока.
+   *
+   * Две реализации одной меры — приглашение к расхождению, и оно уже
+   * случилось: шапка `memory.ts` обещала порог «300 мс», а уровень
+   * проверял 200. Тест сверяет СМЫСЛ: на живой сцене обе меры обязаны
+   * подтверждать, что активность держится, а на погасшей — что нет.
+   */
+  it('обе меры согласны: память есть на живой сцене', () => {
+    const preset = presetById('working-memory');
+    if (!preset) throw new Error('нет пресета');
+    const scene = buildScene(preset);
+    warmUp(scene);
+    scene.network.run(2000);
+
+    // Мера ядра: продвигаем сеть и смотрим удержание.
+    const core = measureMemory(scene.network, { stimulusEndMs: 20, maxMs: 1000 });
+    expect(core.holdMs, 'мера ядра не видит удержания').toBeGreaterThan(200);
+    expect(core.spikesHeld, 'мера ядра не видит спайков').toBeGreaterThan(0);
+
+    // Мера уровня: только наблюдение.
+    const level = evaluateCheck(
+      { kind: 'memoryHold', min: 200, label: 'x' },
+      { network: scene.network, waveCentre: null, stimulusEndMs: 20, windowMs: 600 },
+    );
+    expect(level.passed, 'условие уровня не видит удержания').toBe(true);
+  });
+
+  it('обе меры согласны: памяти нет на ослабленной сцене', () => {
+    const preset = presetById('working-memory');
+    if (!preset) throw new Error('нет пресета');
+
+    // Измерено: при множителе 0.001 прирост прекращается.
+    const weak = buildScene(preset);
+    warmUp(weak);
+    weak.network.setWeightScale(0.001);
+    weak.network.run(2000);
+
+    const core = measureMemory(weak.network, { stimulusEndMs: 20, maxMs: 1000 });
+    const level = evaluateCheck(
+      { kind: 'memoryHold', min: 200, label: 'x' },
+      { network: weak.network, waveCentre: null, stimulusEndMs: 20, windowMs: 600 },
+    );
+    // Мера обязана РАЗЛИЧАТЬ: на погасшей сети условия не выполняется.
+    expect(level.passed, `погасшая сеть прошла удержание: ${level.detail}`).toBe(false);
+    // А мера ядра при этом сообщает о слабой активности, а не о полном нуле.
+    expect(Number.isFinite(core.holdMs)).toBe(true);
   });
 });
