@@ -88,6 +88,18 @@ const SHOTS = [
     title: 'Опыт: сеть научилась различать паттерны',
     minFillPercent: 0.05,
   },
+  {
+    name: 'learning-curve',
+    preset: 'supervised-learning',
+    // Кадр кривой обучения: сеть учится по эпохам, и в панели приборов
+    // появляется график латентности. Обучение по 100 эпохам занимает
+    // несколько секунд — ждём и проверяем, что кривая ДЕЙСТВИТЕЛЬНО
+    // нарисована, а не что кнопка нажата.
+    steps: 0,
+    runEpochs: true,
+    title: 'Кривая обучения: разгон и насыщение',
+    minFillPercent: 0.05,
+  },
 ];
 
 async function main() {
@@ -133,6 +145,31 @@ async function main() {
 
     for (const shot of SHOTS) {
       await cdp.evaluate(`window.__neuroLab.actions.applyPreset(${JSON.stringify(shot.preset)})`);
+      if (shot.runEpochs) {
+        // Кадр кривой обучения. Проверяется не «кнопка нажата», а что на
+        // канвасе прибора появилась НАРИСОВАННАЯ кривая: пустой канвас
+        // прошёл бы проверку на существование.
+        await cdp.evaluate(`document.querySelector('[data-action="run-epochs"]')?.click()`);
+        await delay(5000);
+        const drawn = await cdp.evaluate(`(() => {
+          const c = document.querySelector('[data-instrument="learning-curve"]');
+          if (!c) return '0';
+          const ctx = c.getContext('2d');
+          const data = ctx.getImageData(0, 0, c.width, c.height).data;
+          let lit = 0;
+          for (let i = 0; i < data.length; i += 4) {
+            if (data[i] + data[i + 1] + data[i + 2] > 180) lit += 1;
+          }
+          return String(lit);
+        })()`);
+        if (Number(drawn) < 200) {
+          throw new Error(`кривая обучения не нарисована: ${drawn} пикселей`);
+        }
+        await cdp.evaluate(
+          `document.querySelector('[data-section="experiment"]')?.scrollIntoView({ block: 'center' })`,
+        );
+        await delay(300);
+      }
       if (shot.runExperiment) {
         // Кадр опыта: нажимается НАСТОЯЩАЯ кнопка, потому что снимок обязан
         // показывать то, что видит пользователь после своего действия.

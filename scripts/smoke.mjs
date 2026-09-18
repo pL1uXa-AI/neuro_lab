@@ -885,6 +885,133 @@ async function main() {
       return `прогон 1: разделение ${first.separation}, прогон 2: ${second.separation} при том же «до»`;
     });
 
+    await add('обучение по эпохам: кривая показывает разгон и насыщение', async () => {
+      // ─── Что здесь проверяется ──────────────────────────────────────────
+      //
+      // Одно число «до/после» доказывает факт обучения, но скрывает его ХОД.
+      // Здесь проверяется, что кривая действительно показывает разгон:
+      // латентность ответа на обученный паттерн обязана падать ПО ЭПОХАМ, а
+      // на необученный — нет. Иначе «кривая» была бы прямой линией.
+      await evaluate('window.__neuroLab.actions.toggleRun()');
+      await pause(150);
+      await evaluate(`window.__neuroLab.actions.applyPreset('supervised-learning')`);
+      await pause(200);
+
+      const result = JSON.parse(
+        await evaluate('JSON.stringify(window.__neuroLab.actions.runEpochLearning({ epochs: 60 }))'),
+      );
+      expect(result !== null, 'обучение по эпохам не дало результата');
+      expect(result.curve.length >= 5, `точек в кривой мало: ${result.curve.length}`);
+
+      // Первая и последняя точки: ответ обязан УСКОРИТЬСЯ.
+      const first = result.curve[0];
+      const last = result.curve[result.curve.length - 1];
+      expect(
+        Number.isFinite(first.latencyA) && Number.isFinite(last.latencyA),
+        'в кривой нет конечных значений латентности',
+      );
+      expect(
+        last.latencyA < first.latencyA,
+        `латентность не упала по эпохам: ${first.latencyA} → ${last.latencyA}`,
+      );
+
+      // Кривая обязана быть МОНОТОННОЙ в целом: обучение — это улучшение, и
+      // «пила» из равных значений означала бы, что мера шумит.
+      const drop = first.latencyA - last.latencyA;
+      expect(drop > 0.5, `ускорение слишком мало, чтобы считаться обучением: ${drop}`);
+
+      // Избирательность: на необученный B ответ НЕ ускоряется так же.
+      const gainA = result.latencyABefore - result.latencyAAfter;
+      const gainB = Number.isFinite(result.latencyBAfter)
+        ? result.latencyBBefore - result.latencyBAfter
+        : 0;
+      expect(gainA > gainB, `нет избирательности: выигрыш A ${gainA}, B ${gainB}`);
+      await evaluate('window.__neuroLab.actions.toggleRun()');
+      await pause(150);
+      return `точек ${result.curve.length}, A ${first.latencyA.toFixed(1)} → ${last.latencyA.toFixed(1)} мс, выигрыш ${gainA.toFixed(1)} мс`;
+    });
+
+    await add('кривая обучения рисуется в приборах', async () => {
+      // Проверяется не «канвас есть», а что на нём ДЕЙСТВИТЕЛЬНО что-то
+      // нарисовано: пустой канвас прошёл бы проверку на существование.
+      const drawn = await evaluate(`(() => {
+        const c = document.querySelector('[data-instrument="learning-curve"]');
+        if (!c) return 'нет канваса';
+        const ctx = c.getContext('2d');
+        const data = ctx.getImageData(0, 0, c.width, c.height).data;
+        let lit = 0;
+        for (let i = 0; i < data.length; i += 4) {
+          if (data[i] + data[i + 1] + data[i + 2] > 180) lit += 1;
+        }
+        return String(lit);
+      })()`);
+      const lit = Number(drawn);
+      expect(Number.isFinite(lit), `канвас кривой недоступен: ${drawn}`);
+      expect(lit > 200, `кривая почти не нарисована: ${lit} светящихся пикселей`);
+      return `${lit} светящихся пикселей кривой`;
+    });
+
+    await add('сцена без пути возбуждения: опыт отказывает С ПРИЧИНОЙ', async () => {
+      // ─── Почему отказ обязан быть проверяемым ───────────────────────────
+      //
+      // Опыт требует сети, которая в покое молчит: у «Кольца» активность
+      // самоподдерживающаяся, и понятие «узнать паттерн» там не определено.
+      // Молчаливое «не научилась» заставило бы пользователя подбирать
+      // параметры там, где дело в природе сцены.
+      await evaluate('window.__neuroLab.actions.toggleRun()');
+      await pause(150);
+      await evaluate(`window.__neuroLab.actions.applyPreset('ring')`);
+      await pause(200);
+
+      const result = await evaluate(
+        'JSON.stringify(window.__neuroLab.actions.runEpochLearning({ epochs: 10 }))',
+      );
+      expect(result === 'null', `опыт не отказал на самоподдерживающейся сцене: ${result}`);
+
+      const calibration = JSON.parse(
+        await evaluate('JSON.stringify(window.__neuroLab.actions.getCalibration())'),
+      );
+      expect(calibration.selfOscillating === true, 'сцена не распознана как саморазрядная');
+      expect(
+        calibration.reason.includes('САМА'),
+        `причина отказа не объясняет суть: ${calibration.reason}`,
+      );
+
+      // И то же обязано быть видно в панели, а не только в API.
+      const panel = await evaluate(`document.querySelector('[data-section="experiment"]').innerText`);
+      expect(panel.includes('невозможен'), `панель не показала отказ: ${panel.slice(0, 160)}`);
+      await evaluate('window.__neuroLab.actions.toggleRun()');
+      await pause(150);
+      return `отказ: ${calibration.reason.slice(0, 90)}`;
+    });
+
+    await add('подготовка сцены глушит фоновый вход и это видно в отчёте', async () => {
+      // ─── Что здесь ловится ──────────────────────────────────────────────
+      //
+      // Измерено на «Разреженной сети»: с пуассоновским входом читающий слой
+      // отвечает за 0.5 мс и даёт 272 спайка — отклик порождён ФОНОМ, а не
+      // паттерном, и обучать проекцию бессмысленно. Поэтому вход глушится, и
+      // об этом обязано быть сказано в отчёте.
+      await evaluate('window.__neuroLab.actions.toggleRun()');
+      await pause(150);
+      await evaluate(`window.__neuroLab.actions.applyPreset('random-sparse')`);
+      await pause(200);
+      await evaluate('window.__neuroLab.actions.runEpochLearning({ epochs: 10 })');
+      const calibration = JSON.parse(
+        await evaluate('JSON.stringify(window.__neuroLab.actions.getCalibration())'),
+      );
+      expect(calibration.mutedInput === true, 'фоновый вход не был заглушен');
+      expect(
+        calibration.reason.includes('фоновый вход'),
+        `отчёт не упоминает заглушённый вход: ${calibration.reason}`,
+      );
+      const mode = await evaluate('window.__neuroLab.getScene().network.params.input.mode');
+      expect(mode === 'none', `вход не выключен: ${mode}`);
+      await evaluate('window.__neuroLab.actions.toggleRun()');
+      await pause(150);
+      return `вход заглушен, ${calibration.reason.slice(0, 80)}`;
+    });
+
     // Скриншот для визуальной проверки.
     await evaluate(`window.__neuroLab.actions.applyPreset('wave')`);
     await evaluate('window.__neuroLab.actions.runSteps(400)');

@@ -33,6 +33,14 @@ import {
   runLearningExperiment,
   type LearningExperimentResult,
 } from '../core/experiment.js';
+import {
+  DEFAULT_EPOCH_LEARNING,
+  describeCurve,
+  learnByEpochs,
+  prepareForLearning,
+  type CalibrationResult,
+  type EpochLearningResult,
+} from '../core/epoch-learning.js';
 import { LEVELS, levelById, type Level } from '../levels/levels.js';
 import { LevelSession, type LevelReport } from '../levels/session.js';
 import { SceneRenderer } from '../render/scene.js';
@@ -93,6 +101,19 @@ export interface NeuroLabApi {
     runExperiment(options?: { trials?: number; learn?: boolean }): LearningExperimentResult;
     /** Последний результат опыта (null, если он ещё не запускался). */
     getExperiment(): LearningExperimentResult | null;
+    /**
+     * Обучить по эпохам и снять кривую обучения.
+     *
+     * Перед обучением сцена ПОДГОТАВЛИВАЕТСЯ: глушится фоновый вход, при
+     * необходимости подбирается масштаб веса, границы STDP приводятся к
+     * масштабу сцены. Если сцена для опыта не годится (кольцо разряжается
+     * само), возвращается `null`, а причина — в `getCalibration()`.
+     */
+    runEpochLearning(options?: { epochs?: number; learn?: boolean }): EpochLearningResult | null;
+    /** Последний результат обучения по эпохам. */
+    getEpochLearning(): EpochLearningResult | null;
+    /** Последняя подготовка сцены (в том числе отказ с причиной). */
+    getCalibration(): CalibrationResult | null;
     openHelp(): void;
     /**
      * Закрыть справку, если она открыта.
@@ -135,6 +156,8 @@ export interface NeuroLabApi {
     oscilloscope(): HTMLCanvasElement | null;
     /** График частоты популяции (для проверок). */
     rate(): HTMLCanvasElement | null;
+    /** Кривая обучения (для проверок). */
+    learningCurve(): HTMLCanvasElement | null;
   };
   /** Текущее положение кисти в мировых координатах (для проверок). */
   inputBrush(): { x: number; y: number; radius: number } | null;
@@ -159,6 +182,8 @@ export class App {
   private oscilloscopeCanvas: HTMLCanvasElement | null = null;
   /** График частоты популяции: собирается из `trajectory`. */
   private rateCanvas: HTMLCanvasElement | null = null;
+  /** Кривая обучения: латентность ответа по эпохам. */
+  private curveCanvas: HTMLCanvasElement | null = null;
   private statHost: HTMLElement | null = null;
   private levelHost: HTMLElement | null = null;
   private reportHost: HTMLElement | null = null;
@@ -175,6 +200,12 @@ export class App {
   private experimentControl: LearningExperimentResult | null = null;
   /** Куда выводить результат опыта. */
   private experimentHost: HTMLElement | null = null;
+  /** Кривая обучения: результат опыта по эпохам. */
+  private epochLearning: EpochLearningResult | null = null;
+  /** Контрольный прогон по эпохам (STDP выключен). */
+  private epochControl: EpochLearningResult | null = null;
+  /** Подготовка сцены к опыту: результат или причина отказа. */
+  private calibration: CalibrationResult | null = null;
   /** Ползунки «своей сети»: нужны, чтобы вернуть их к значениям пресета. */
   private customControls: Array<{ set(value: number): void }> | null = null;
   /** Пояснение к выбранной структуре. */
@@ -343,6 +374,94 @@ export class App {
   }
 
   /**
+   * Обучить по эпохам и снять кривую обучения.
+   *
+   * ─── Почему одного числа «до/после» мало ────────────────────────────────
+   *
+   * Опыт `experiment.ts` доказывает ФАКТ обучения, но ничего не говорит о его
+   * ХОДЕ. Между «не научилась» и «научилась» лежит самое интересное: как
+   * быстро, до какого предела, не портится ли со временем. Кривая отвечает
+   * именно на это — видно разгон, насыщение и плато.
+   *
+   * ─── Почему перед обучением сцена ГОТОВИТСЯ ─────────────────────────────
+   *
+   * Опыт работал только на специально подобранной сцене. На произвольных
+   * «своих сетях» он давал нулевое различение, и выглядело это как «обучение
+   * сломано». Причины оказались измеримыми: фоновый вход, который делает
+   * паттерн неразличимым, и вес ниже порога распространения. `prepareForLearning`
+   * убирает и то и другое, а если сцена не годится в принципе (кольцо
+   * разряжается само) — честно отказывается с объяснением.
+   */
+  runEpochLearning(options: { epochs?: number; learn?: boolean } = {}): EpochLearningResult | null {
+    const network = this.scene.network;
+    const config = {
+      ...DEFAULT_EPOCH_LEARNING,
+      ...(options.epochs !== undefined ? { epochs: options.epochs } : {}),
+    };
+
+    // Останавливаем живой цикл: иначе сеть считает между эпохами, и «до/после»
+    // меряется на разном числе шагов — сравнение перестаёт быть честным.
+    const wasRunning = this.state.running;
+    this.state.running = false;
+    try {
+      const calibration = prepareForLearning(network);
+      this.calibration = calibration;
+      if (!calibration.usable) {
+        this.epochLearning = null;
+        this.epochControl = null;
+        this.renderExperiment();
+        return null;
+      }
+
+      const learn = options.learn ?? true;
+      // Контроль — на ОТДЕЛЬНОЙ свежей сцене, иначе он измерял бы «что
+      // осталось от обучения», а не «что было бы без него».
+      this.epochControl = null;
+      const preset = this.state.presetId ? presetById(this.state.presetId) : undefined;
+      if (learn && preset) {
+        const controlScene = buildScene(preset);
+        warmUp(controlScene);
+        const controlCalibration = prepareForLearning(controlScene.network);
+        if (controlCalibration.usable) {
+          this.epochControl = learnByEpochs(controlScene.network, config, { learn: false });
+        }
+      }
+
+      const result = learnByEpochs(network, config, { learn });
+      this.epochLearning = result;
+      this.updateInstruments();
+      this.updateStats();
+      this.renderExperiment();
+      return result;
+    } finally {
+      this.state.running = wasRunning;
+    }
+  }
+
+  /** Последний результат обучения по эпохам. */
+  getEpochLearning(): EpochLearningResult | null {
+    return this.epochLearning;
+  }
+
+  /** Последняя подготовка сцены к опыту. */
+  getCalibration(): CalibrationResult | null {
+    return this.calibration;
+  }
+
+  /**
+   * Запустить обучение по эпохам со СВЕЖЕЙ сцены.
+   *
+   * Если обучать ту сеть, что уже на экране, второе нажатие кнопки дало бы
+   * другой результат: «до» измерялось бы на уже обученной сети.
+   */
+  private runEpochLearningPair(epochs?: number): void {
+    const preset = this.state.presetId ? presetById(this.state.presetId) : undefined;
+    if (!preset) return;
+    this.applyPreset(preset);
+    this.runEpochLearning(epochs !== undefined ? { epochs } : {});
+  }
+
+  /**
    * Пересобрать сцену и запустить полный опыт: обучение плюс контроль.
    *
    * Контроль идёт на СВЕЖЕЙ копии сцены: на уже обученной сети он измерял бы
@@ -380,16 +499,43 @@ export class App {
 
   /** Показать результат опыта в панели. */
   private renderExperiment(): void {
-    if (!this.experimentHost) return;
+    const host = this.experimentHost;
+    if (!host) return;
+    host.replaceChildren();
+
+    // ─── Подготовка сцены: отказ важнее результата ────────────────────────
+    //
+    // Если сцена для опыта не годится (кольцо разряжается само), показывать
+    // таблицы бессмысленно. Но и молчать нельзя: пользователь должен узнать
+    // ПРИЧИНУ, а не решить, что «обучение сломано».
+    if (this.calibration && !this.calibration.usable) {
+      host.append(
+        h(
+          'div',
+          { class: 'experiment__verdict experiment__verdict--no' },
+          'Опыт в этой сцене невозможен',
+        ),
+        h('div', { class: 'hint' }, this.calibration.reason),
+      );
+      return;
+    }
+
+    // ─── Кривая обучения: основной результат ──────────────────────────────
+    if (this.epochLearning) {
+      this.renderCurve(this.epochLearning);
+      return;
+    }
+
+    // ─── Опыт «до/после» — запасной, если кривую не строили ───────────────
     const result = this.experiment;
-    this.experimentHost.replaceChildren();
     if (!result) {
-      this.experimentHost.append(
+      host.append(
         h(
           'div',
           { class: 'hint' },
-          'Нажмите «Прогнать опыт»: сеть обучится на паттерне A и проверится ' +
-            'на паттерне B. Результат — измеренный, а не «на глаз».',
+          'Нажмите «Обучить по эпохам»: сеть будет учиться пошагово, и после ' +
+            'каждого шага измеряется, насколько БЫСТРО она узнаёт обученный ' +
+            'паттерн. Результат — кривая обучения, а не одно число.',
         ),
       );
       return;
@@ -397,25 +543,17 @@ export class App {
 
     const { learned, summary } = describeExperiment(result, this.experimentControl ?? undefined);
     const table = h('div', { class: 'experiment' });
-    const row = (label: string, value: string, cls = ''): HTMLElement =>
-      h(
-        'div',
-        { class: `experiment__row ${cls}` },
-        h('span', { class: 'experiment__label' }, label),
-        h('span', { class: 'experiment__value' }, value),
-      );
-
     table.append(
-      row('отклик на A до', String(result.beforeA)),
-      row('отклик на A после', String(result.afterA), result.gain > 0 ? 'experiment__row--up' : ''),
-      row('отклик на B после', String(result.afterB)),
-      row('разделение A − B', String(result.separation), result.separation > 0 ? 'experiment__row--up' : ''),
-      row('средний вес', `${result.weightBefore.toFixed(3)} → ${result.weightAfter.toFixed(3)}`),
-      row('обновлений STDP', format.int(result.stdpUpdates)),
+      this.experimentRow('отклик на A до', String(result.beforeA)),
+      this.experimentRow('отклик на A после', String(result.afterA), result.gain > 0 ? 'experiment__row--up' : ''),
+      this.experimentRow('отклик на B после', String(result.afterB)),
+      this.experimentRow('разделение A − B', String(result.separation), result.separation > 0 ? 'experiment__row--up' : ''),
+      this.experimentRow('средний вес', `${result.weightBefore.toFixed(3)} → ${result.weightAfter.toFixed(3)}`),
+      this.experimentRow('обновлений STDP', format.int(result.stdpUpdates)),
     );
     if (this.experimentControl) {
       table.append(
-        row(
+        this.experimentRow(
           'контроль (без обучения)',
           `разделение ${this.experimentControl.separation}`,
           this.experimentControl.separation <= 0 ? 'experiment__row--ok' : 'experiment__row--warn',
@@ -423,7 +561,7 @@ export class App {
       );
     }
 
-    this.experimentHost.append(
+    host.append(
       h(
         'div',
         { class: `experiment__verdict ${learned ? 'experiment__verdict--yes' : 'experiment__verdict--no'}` },
@@ -431,12 +569,85 @@ export class App {
       ),
       table,
       h('div', { class: 'hint' }, summary),
+    );
+  }
+
+  /** Строка «подпись — значение» в таблице опыта. */
+  private experimentRow(label: string, value: string, cls = ''): HTMLElement {
+    return h(
+      'div',
+      { class: `experiment__row ${cls}` },
+      h('span', { class: 'experiment__label' }, label),
+      h('span', { class: 'experiment__value' }, value),
+    );
+  }
+
+  /**
+   * Показать кривую обучения словами и числами.
+   *
+   * ─── Почему таблица, а не график ─────────────────────────────────────────
+   *
+   * График кривой живёт в приборах (`drawLearningCurve`), и дублировать его
+   * здесь значило бы держать две отрисовки одного и того же. Здесь — ЧИСЛА и
+   * вердикт: разгон, ускорение, контроль. График показывает форму, таблица —
+   * значения; нужны обе.
+   */
+  private renderCurve(result: EpochLearningResult): void {
+    const host = this.experimentHost;
+    if (!host) return;
+    const { learned, summary } = describeCurve(result, this.epochControl ?? undefined);
+    const fmt = (value: number): string =>
+      Number.isFinite(value) ? `${value.toFixed(1)} мс` : 'нет ответа';
+    const gain = Number.isFinite(result.latencyAAfter)
+      ? result.latencyABefore - result.latencyAAfter
+      : Number.NaN;
+
+    const table = h('div', { class: 'experiment' });
+    table.append(
+      this.experimentRow('было (латентность A)', fmt(result.latencyABefore)),
+      this.experimentRow(
+        'стало',
+        fmt(result.latencyAAfter),
+        Number.isFinite(gain) && gain > 0 ? 'experiment__row--up' : '',
+      ),
+      this.experimentRow(
+        'ускорение',
+        Number.isFinite(gain) ? `${gain >= 0 ? '+' : ''}${gain.toFixed(1)} мс` : '—',
+        Number.isFinite(gain) && gain > 0 ? 'experiment__row--up' : '',
+      ),
+      this.experimentRow('необученный B', fmt(result.latencyBAfter)),
+      this.experimentRow('эпох пройдено', format.int(result.epochsRun)),
+      this.experimentRow('средний вес', `${result.weightBefore.toFixed(3)} → ${result.weightAfter.toFixed(3)}`),
+      this.experimentRow('обновлений STDP', format.int(result.stdpUpdates)),
+    );
+
+    if (this.epochControl) {
+      const controlGain = Number.isFinite(this.epochControl.latencyAAfter)
+        ? this.epochControl.latencyABefore - this.epochControl.latencyAAfter
+        : 0;
+      table.append(
+        this.experimentRow(
+          'контроль (без обучения)',
+          `${controlGain >= 0 ? '+' : ''}${controlGain.toFixed(1)} мс`,
+          Math.abs(controlGain) < 0.5 ? 'experiment__row--ok' : 'experiment__row--warn',
+        ),
+      );
+    }
+
+    host.append(
+      h(
+        'div',
+        { class: `experiment__verdict ${learned ? 'experiment__verdict--yes' : 'experiment__verdict--no'}` },
+        learned ? 'Сеть научилась узнавать паттерн быстрее' : 'Ускорения не возникло',
+      ),
+      table,
+      h('div', { class: 'hint' }, summary),
       h(
         'div',
         { class: 'hint' },
-        'A — паттерн, на который сеть учили (стимул, затем «учитель» заставляет ' +
-          'выход сработать). B — такой же по размеру паттерн, которым не учили. ' +
-          'Если обучение работает, отклик на A выше.',
+        'Латентность — время до первого спайка читающего слоя после стимула. ' +
+          'Обученная сеть узнаёт знакомый паттерн РАНЬШЕ; форма кривой — на ' +
+          'графике в приборах.',
       ),
     );
   }
@@ -490,6 +701,9 @@ export class App {
         endPoke: () => this.endPoke(),
         runExperiment: (options) => this.runExperiment(options ?? {}),
         getExperiment: () => this.experiment,
+        runEpochLearning: (options) => this.runEpochLearning(options ?? {}),
+        getEpochLearning: () => this.epochLearning,
+        getCalibration: () => this.calibration,
         resetScene: () => this.resetScene(),
         openHelp: () => this.openHelp(),
         closeHelp: () => this.closeHelp(),
@@ -500,6 +714,7 @@ export class App {
         raster: () => this.rasterCanvas,
         oscilloscope: () => this.oscilloscopeCanvas,
         rate: () => this.rateCanvas,
+        learningCurve: () => this.curveCanvas,
       },
       inputBrush: () => this.input?.brush ?? null,
     };
@@ -566,7 +781,22 @@ export class App {
     this.rateCanvas.dataset['instrument'] = 'rate-plot';
     rateBox.append(this.rateCanvas);
 
-    instruments.append(oscilloscopeBox, rasterBox, rateBox);
+    // ─── Четвёртый прибор: кривая обучения ────────────────────────────────
+    //
+    // ─── Почему кривая, а не ещё одно число в панели ──────────────────────
+    //
+    // Числа «до/после» доказывают факт обучения, но скрывают его ХОД: как
+    // быстро, до какого предела, не портится ли со временем. Кривая отвечает
+    // на это глазами — видно разгон, насыщение и плато.
+    //
+    // Пока опыт не запускали, панель пуста, и это честно: рисовать «нулевую
+    // кривую» значило бы показывать данные, которых нет.
+    const curveBox = h('div', { class: 'instrument' });
+    this.curveCanvas = canvas('learning-curve');
+    this.curveCanvas.dataset['instrument'] = 'learning-curve';
+    curveBox.append(this.curveCanvas);
+
+    instruments.append(oscilloscopeBox, rasterBox, rateBox, curveBox);
 
     this.host.append(topbar, this.stageHost, this.sidebar, instruments);
   }
@@ -655,12 +885,19 @@ export class App {
       h(
         'div',
         { class: 'btn-row' },
-        button('Прогнать опыт', () => this.runExperimentPair(DEFAULT_EXPERIMENT.trials), {
+        button('Обучить по эпохам', () => this.runEpochLearningPair(), {
           class: 'btn--primary',
-          'data-action': 'run-experiment',
+          'data-action': 'run-epochs',
         }),
-        button('Опыт ×2', () => this.runExperimentPair(DEFAULT_EXPERIMENT.trials * 2), {
-          'data-action': 'run-experiment-long',
+        button('Коротко (30)', () => this.runEpochLearningPair(30), {
+          'data-action': 'run-epochs-short',
+        }),
+      ),
+      h(
+        'div',
+        { class: 'btn-row' },
+        button('Прогнать опыт', () => this.runExperimentPair(DEFAULT_EXPERIMENT.trials), {
+          'data-action': 'run-experiment',
         }),
       ),
       experimentOutput,
@@ -1477,6 +1714,104 @@ export class App {
         guide: { value: 1, label: 'молчание', color: PLOT_COLORS.guide },
       });
     }
+
+    this.drawLearningCurve();
+  }
+
+  /**
+   * Нарисовать кривую обучения: латентность ответа по эпохам.
+   *
+   * ─── Что здесь важно показать ────────────────────────────────────────────
+   *
+   * Рядом идут линии ответа на ОБУЧЕННЫЙ паттерн A и на необученный B. Смысл
+   * обучения именно в РАСХОЖДЕНИИ: если обе падают одинаково, сеть просто
+   * «разогрелась» от повторения стимула, а не научилась различать. Контроль
+   * (обучение выключено) идёт третьей линией и обязан остаться на месте.
+   *
+   * ─── Почему значения идут со знаком минус ────────────────────────────────
+   *
+   * У `drawPlot` ось Y растёт вверх, а МЕНЬШАЯ латентность — это ЛУЧШЕ.
+   * Без инверсии успешное обучение выглядело бы падением графика. Инверсия
+   * делается знаком значений, а не переворотом осей в `drawPlot`: у графика
+   * общий код с частотой популяции, и менять его ради одной панели значило бы
+   * ломать остальные.
+   *
+   * Пока опыт не запускали, панель остаётся пустой: рисовать «нулевую кривую»
+   * означало бы показывать данные, которых нет.
+   */
+  private drawLearningCurve(): void {
+    const target = this.curveCanvas;
+    if (!target) return;
+    const result = this.epochLearning;
+    if (!result || result.curve.length < 2) {
+      const ctx = target.getContext('2d');
+      if (!ctx) return;
+      const ratio = window.devicePixelRatio || 1;
+      const width = target.clientWidth || 300;
+      const height = target.clientHeight || 110;
+      target.width = Math.round(width * ratio);
+      target.height = Math.round(height * ratio);
+      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+      ctx.clearRect(0, 0, width, height);
+      ctx.fillStyle = '#9fb0c8';
+      ctx.font = '11px system-ui, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText('Кривая обучения', 6, 2);
+      ctx.fillStyle = '#5a6b85';
+      ctx.fillText('запустите «Обучить по эпохам»', 6, 18);
+      return;
+    }
+
+    const extract = (
+      source: EpochLearningResult,
+      pick: (point: EpochLearningResult['curve'][number]) => number,
+    ): { times: number[]; values: number[] } => {
+      const times: number[] = [];
+      const values: number[] = [];
+      for (const point of source.curve) {
+        const value = pick(point);
+        if (!Number.isFinite(value)) continue;
+        times.push(point.trainedEpochs);
+        values.push(-value);
+      }
+      return { times, values };
+    };
+
+    const series: Array<{
+      label: string;
+      color: string;
+      times: number[];
+      values: number[];
+      width?: number;
+    }> = [
+      {
+        label: 'A (обучен)',
+        color: PLOT_COLORS.activeRate,
+        ...extract(result, (point) => point.latencyA),
+        width: 1.8,
+      },
+      {
+        label: 'B (не обучен)',
+        color: PLOT_COLORS.cv,
+        ...extract(result, (point) => point.latencyB),
+        width: 1.3,
+      },
+    ];
+    if (this.epochControl) {
+      series.push({
+        label: 'контроль',
+        color: PLOT_COLORS.guide,
+        ...extract(this.epochControl, (point) => point.latencyA),
+        width: 1.2,
+      });
+    }
+
+    drawPlot(target, {
+      title: 'Кривая обучения',
+      unit: 'мс (выше — быстрее)',
+      series,
+    });
   }
 
   /**
