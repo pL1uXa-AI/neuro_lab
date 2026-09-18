@@ -307,3 +307,128 @@ describe('«удар током» (poke)', () => {
     expect(network.state.spikeCount[0]).toBe(before);
   });
 });
+
+describe('масштаб мира не влияет на силу удара', () => {
+  /**
+   * Собрать равномерную квадратную решётку `side × side` с заданным шагом.
+   *
+   * Возвращает сеть без связей и внешнего входа: измеряется чистый эффект
+   * удара, а не фон.
+   */
+  function lattice(side: number, spacing: number): Network {
+    const count = side * side;
+    const params = {
+      ...DEFAULT_NETWORK_PARAMS,
+      count,
+      dt: 0.5,
+      input: { mode: 'none' as const, amplitude: 0, rate: 0, weight: 0, fraction: 0 },
+    };
+    const network = new Network(params, buildSynapses(count, [], [], [], []));
+    for (let i = 0; i < count; i++) {
+      network.x[i] = (i % side) * spacing;
+      network.y[i] = Math.floor(i / side) * spacing;
+    }
+    initNeurons(network.state, network.params.neuron, 0);
+    return network;
+  }
+
+  it('оценка шага между нейронами совпадает с фактическим', () => {
+    // Оценка идёт по площади (√(площадь / count)), поэтому на равномерной
+    // решётке обязана совпасть с настоящим шагом. Это и делает её
+    // пригодной для перевода радиуса.
+    for (const [side, spacing] of [
+      [10, 1],
+      [20, 1],
+      [10, 3],
+      [28, 0.5],
+    ] as const) {
+      const network = lattice(side, spacing);
+      expect(network.neuronSpacing()).toBeCloseTo(spacing, 6);
+    }
+  });
+
+  it('один и тот же радиус накрывает одинаковое число нейронов при разном масштабе мира', () => {
+    // ─── Суть дефекта, который здесь закрыт ──────────────────────────────
+    //
+    // Радиус удара задавался прямо в МИРОВЫХ единицах, а масштаб мира у
+    // пресетов разный: измерено, что радиус 2.5 накрывал 16 нейронов на
+    // волне (шаг 0.98) и только 8 в разреженной сети (шаг 1.78). Для
+    // пользователя это означало, что одинаковый на вид удар действует
+    // по-разному, и на основных сетях почти незаметен.
+    //
+    // Теперь радиус задаётся в шагах между нейронами, поэтому ЧИСЛО
+    // накрытых нейронов обязано совпадать. Считается честным перебором
+    // расстояний, а не по формуле радиуса.
+    const covered = (network: Network, radiusInSpacings: number): number => {
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minY = Infinity;
+      let maxY = -Infinity;
+      for (let i = 0; i < network.params.count; i++) {
+        minX = Math.min(minX, network.x[i]);
+        maxX = Math.max(maxX, network.x[i]);
+        minY = Math.min(minY, network.y[i]);
+        maxY = Math.max(maxY, network.y[i]);
+      }
+      const cx = (minX + maxX) / 2;
+      const cy = (minY + maxY) / 2;
+      const radius = network.pokeRadiusWorld(radiusInSpacings);
+      let count = 0;
+      for (let i = 0; i < network.params.count; i++) {
+        const dx = network.x[i] - cx;
+        const dy = network.y[i] - cy;
+        if (dx * dx + dy * dy <= radius * radius) count += 1;
+      }
+      return count;
+    };
+
+    const small = lattice(10, 1); // шаг 1
+    const large = lattice(10, 3); // шаг 3 — «другой масштаб мира»
+
+    for (const radius of [1, 1.5, 2, 2.5]) {
+      expect(covered(large, radius)).toBe(covered(small, radius));
+    }
+  });
+
+  it('удар в пятно реально возбуждает нейроны на любом масштабе мира', () => {
+    // Проверяется СЛЕДСТВИЕ, а не формула: нейроны внутри пятна должны
+    // сработать, а за его пределами — нет.
+    for (const spacing of [0.5, 1, 3]) {
+      const network = lattice(11, spacing);
+      const center = 5 * spacing; // центральный нейрон решётки
+      network.poke(center, center, 1.2, 20, 5);
+      network.run(10);
+
+      const centerIndex = 5 * 11 + 5;
+      const cornerIndex = 0; // угол далеко за пределами пятна
+      expect(network.state.spikeCount[centerIndex]).toBeGreaterThan(0);
+      expect(network.state.spikeCount[cornerIndex]).toBe(0);
+    }
+  });
+
+  it('вырожденная раскладка не даёт нулевого или бесконечного радиуса', () => {
+    // Все нейроны в одной точке: расстояние не определено. Радиус обязан
+    // остаться конечным и положительным, иначе стимул либо исчезнет, либо
+    // накроет всю сеть.
+    const count = 3;
+    const params = {
+      ...DEFAULT_NETWORK_PARAMS,
+      count,
+      dt: 0.5,
+      input: { mode: 'none' as const, amplitude: 0, rate: 0, weight: 0, fraction: 0 },
+    };
+    const network = new Network(params, buildSynapses(count, [], [], [], []));
+    for (let i = 0; i < count; i++) {
+      network.x[i] = 0;
+      network.y[i] = 0;
+    }
+    const spacing = network.neuronSpacing();
+    expect(Number.isFinite(spacing)).toBe(true);
+    expect(spacing).toBeGreaterThan(0);
+
+    network.poke(0, 0, 2.5, 20, 5);
+    network.run(10);
+    // Удар в точке, где стоят все нейроны, обязан их возбудить.
+    expect(network.state.spikeCount[0]).toBeGreaterThan(0);
+  });
+});

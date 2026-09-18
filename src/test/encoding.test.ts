@@ -54,14 +54,24 @@ function collectFiles(dir: string, out: string[] = []): string[] {
 
 describe('кодировка исходников', () => {
   it('ни в одном файле нет признаков mojibake', () => {
-    // Документация добавляется в список по мере появления: тест не должен
-    // падать из-за того, что файл ещё не написан.
+    // ─── Почему документация собирается ОБХОДОМ, а не списком ─────────────
+    //
+    // Первая версия перечисляла файлы явно: `README.md`, `ROADMAP.md`,
+    // `docs/NEXT-SESSION.md`. Из-за этого ЛЮБОЙ новый файл документации
+    // оказывался вне проверки, и порча в нём проходила молча. Проверено
+    // пробой: испорченный `docs/zz-probe.md` не находили ни тест, ни
+    // `fix-encoding.mjs` (у скрипта шаблон `*.md` одноуровневый и `docs/` не
+    // покрывал).
+    //
+    // Теперь обходятся ВСЕ `.md` в корне и в `docs/` — так же, как это уже
+    // сделано для `src/` и `scripts/`. Файла ещё нет — не беда: список
+    // берётся из каталога, а не из воображаемого будущего.
     const candidates = [
       ...collectFiles(join(ROOT, 'src')),
       ...collectFiles(join(ROOT, 'scripts')),
+      ...collectFiles(join(ROOT, 'docs')),
       join(ROOT, 'README.md'),
       join(ROOT, 'ROADMAP.md'),
-      join(ROOT, 'docs', 'NEXT-SESSION.md'),
       join(ROOT, 'index.html'),
     ];
     const files: string[] = [];
@@ -135,6 +145,37 @@ describe('кодировка исходников', () => {
     }
     for (const title of ['Спайк', 'Адаптация', 'Пачки', 'Обучение', 'Волна']) {
       expect(levels.includes(`'${title}'`), `уровень «${title}» не найден`).toBe(true);
+    }
+  });
+
+  it('проверка покрывает ВСЕ файлы документации, а не список известных', () => {
+    // ─── Зачем этот тест ─────────────────────────────────────────────────
+    //
+    // Проверка кодировки бесполезна, если новый файл в неё не попал. Именно
+    // так и случилось: список документации был задан ЯВНО (`README.md`,
+    // `ROADMAP.md`, `docs/NEXT-SESSION.md`), и порча в любом новом `.md`
+    // проходила молча — проверено пробой с `docs/zz-probe.md`.
+    //
+    // Здесь сверяется само ПОКРЫТИЕ: каждый `.md` проекта обязан оказаться в
+    // списке проверяемых. Если кто-то добавит `docs/ЧТО-ТО.md` и забудет
+    // расширить обход, этот тест упадёт и объяснит, что делать.
+    const docs = readdirSync(join(ROOT, 'docs'))
+      .filter((name) => name.endsWith('.md'))
+      .map((name) => join('docs', name));
+    const rootDocs = readdirSync(ROOT).filter((name) => name.endsWith('.md'));
+
+    const checked = new Set(
+      [
+        ...collectFiles(join(ROOT, 'src')),
+        ...collectFiles(join(ROOT, 'scripts')),
+        ...collectFiles(join(ROOT, 'docs')),
+        ...rootDocs.map((name) => join(ROOT, name)),
+      ].map((file) => relative(ROOT, file)),
+    );
+
+    expect(docs.length).toBeGreaterThan(0);
+    for (const doc of [...rootDocs, ...docs]) {
+      expect(checked.has(doc), `${doc} не проверяется на кодировку`).toBe(true);
     }
   });
 });

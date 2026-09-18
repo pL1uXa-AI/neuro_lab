@@ -178,7 +178,7 @@ export class App {
       onReset: () => this.resetScene(),
       onHelp: () => this.openHelp(),
     });
-    this.input.brushRadius = this.state.view.brushRadius;
+    this.syncBrushRadius();
 
     window.addEventListener('resize', () => this.resize());
     this.resize();
@@ -198,14 +198,30 @@ export class App {
   /**
    * «Удар током» в мировую точку.
    *
-   * Амплитуда берётся из состояния, а не задана здесь: её меняет ползунок
-   * «Сила удара», и держать её в двух местах значило бы однажды разойтись.
+   * Амплитуда и радиус берутся из состояния, а не заданы здесь: их меняют
+   * ползунки, и держать их в двух местах значило бы однажды разойтись.
+   * Радиус передаётся в «шагах между нейронами» — `Network.poke` сам
+   * переводит его в мировые единицы, потому что масштаб мира у пресетов
+   * разный (см. `neuronSpacing`).
    */
   private pokeAt(x: number, y: number): void {
     const network = this.scene?.network;
     if (!network) return;
     network.poke(x, y, this.state.view.brushRadius, this.state.view.pokeStrength, 6);
     this.stimulusActive = true;
+  }
+
+  /**
+   * Перенести радиус кисти из состояния в контроллер ввода.
+   *
+   * Состояние хранит радиус в «шагах между нейронами» (так его видит
+   * пользователь), а контроллеру для отрисовки кольца нужны мировые
+   * единицы. Пересчёт делается при смене сцены и при движении ползунка —
+   * именно в эти моменты масштаб мира и меняется.
+   */
+  private syncBrushRadius(): void {
+    if (!this.input || !this.scene) return;
+    this.input.brushRadius = this.scene.network.pokeRadiusWorld(this.state.view.brushRadius);
   }
 
   /** Снять удар: стимул живёт только пока кнопка нажата. */
@@ -444,7 +460,7 @@ export class App {
       format: (value) => value.toFixed(1),
       onInput: (value) => {
         this.state.view.brushRadius = value;
-        if (this.input) this.input.brushRadius = value;
+        this.syncBrushRadius();
       },
     });
     pokeHost.append(
@@ -536,6 +552,9 @@ export class App {
 
     this.fitCamera();
     this.syncHud();
+    // Радиус кисти пересчитывается ПОСЛЕ смены сцены: он задан в шагах
+    // между нейронами, а шаг зависит от пресета.
+    this.syncBrushRadius();
     this.updatePresetButtons();
     this.updateModelToggle();
     this.updateColorToggle();
